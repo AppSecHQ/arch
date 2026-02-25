@@ -1,0 +1,13 @@
+# ARCH - Agent Runtime & Coordination Harness
+
+# Core dependencies
+anthropic>=0.40.0
+mcp>=1.0.0
+textual>=0.60.0
+gitpython>=3.1.0
+pyyaml>=6.0.0
+docker>=7.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
