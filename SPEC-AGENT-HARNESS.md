@@ -44,8 +44,7 @@ arch/
 ├── arch/
 │   ├── __init__.py
 │   ├── orchestrator.py         # Lifecycle: reads config, spawns agents, teardown
-│   ├── mcp_server.py           # Local MCP server (message bus + state + tools)
-│   ├── mcp_proxy.py            # Thin stdio shim, one per agent, tags calls with agent_id
+│   ├── mcp_server.py           # MCP server over SSE/HTTP (message bus + state + tools)
 │   ├── session.py              # Manages individual claude CLI subprocesses (local or container)
 │   ├── container.py            # Docker container lifecycle management
 │   ├── worktree.py             # Git worktree creation and cleanup
@@ -65,7 +64,9 @@ arch/
     ├── agents.json             # Live agent registry
     ├── messages.json           # Message bus log
     ├── usage.json              # Token usage per agent
-    └── tasks.json              # Task assignments
+    ├── tasks.json              # Task assignments
+    ├── archie-cursor.json      # Persisted message read cursor (since_id) — survives compaction
+    └── permissions_audit.log   # Timestamped log of --dangerously-skip-permissions usage
 ```
 
 ---
@@ -218,19 +219,21 @@ Responsible for the full lifecycle of the ARCH system.
 
 A local MCP server running on `localhost:{mcp_port}`. All claude sessions connect to it. It is the sole communication channel between agents and between agents and the harness.
 
-**Transport:** Each `claude` process connects via stdio MCP through the `mcp_proxy.py` shim, which tags every call with the agent's `agent_id` before forwarding to the central MCP server state.
+**Transport:** The harness runs a single MCP HTTP/SSE server on `localhost:{mcp_port}`. Each `claude` process connects directly to it using the SSE transport. The `agent_id` is embedded in the URL path so the server knows which agent is calling — no proxy shim required.
 
 **Generated MCP config** (written per-agent to `state/{agent_id}-mcp.json` at spawn time):
 ```json
 {
   "mcpServers": {
     "arch": {
-      "command": "python",
-      "args": ["-m", "arch.mcp_proxy", "--agent-id", "{agent_id}", "--port", "{mcp_port}"]
+      "type": "sse",
+      "url": "http://localhost:{mcp_port}/sse/{agent_id}"
     }
   }
 }
 ```
+
+**Server implementation:** Use the official `mcp` Python SDK's SSE server mode. The server extracts `agent_id` from the URL path on each request to identify the calling agent and enforce tool access controls (Archie vs worker).
 
 #### MCP Tools — Available to ALL agents
 
@@ -245,8 +248,12 @@ send_message
 get_messages
   description: "Retrieve messages addressed to you"
   params:
-    since_id: string?   # optional: only return messages newer than this ID
-  returns: { messages: [{ id, from, to, content, timestamp, read }] }
+    since_id: string?   # optional: only return messages newer than this ID.
+                        # If omitted, the harness automatically uses the last persisted
+                        # cursor from state/archie-cursor.json so Archie never re-reads
+                        # messages after a compaction or restart.
+  returns: { messages: [{ id, from, to, content, timestamp, read }], cursor: string }
+  # The harness persists the returned cursor to state/archie-cursor.json after every call.
 
 update_status
   description: "Report your current task and status to the harness (shown in dashboard)"
@@ -403,21 +410,7 @@ subprocess.run(["gh", "issue", "close", str(issue_number), "--comment", comment]
 
 ---
 
-### 3. MCP Proxy Shim (`arch/mcp_proxy.py`)
-
-A lightweight stdio MCP process spawned once per agent. Acts as a bridge between the agent's claude process and the central harness MCP server.
-
-**Responsibilities:**
-- Accept stdio MCP connections from a `claude` subprocess
-- Inject `agent_id` into every tool call before forwarding to the internal state store
-- Return responses back over stdio
-- For `escalate_to_user`: block the MCP response on an `asyncio.Event` that the dashboard sets when the user answers
-
-**Implementation:** Python `asyncio` subprocess. Not a full network server — it writes directly to the shared in-process state store via imported module (same Python process as the harness).
-
----
-
-### 4. Session Manager (`arch/session.py`)
+### 3. Session Manager (`arch/session.py`)
 
 Manages the lifecycle of a single `claude` CLI subprocess, either running locally or inside a Docker container. Delegates container logic to `container.py`.
 
@@ -477,15 +470,13 @@ The agent's worktree is mounted into the container as a volume. The claude CLI r
 {
   "mcpServers": {
     "arch": {
-      "command": "python",
-      "args": ["-m", "arch.mcp_proxy", "--agent-id", "{agent_id}", "--port", "{mcp_port}"],
-      "env": {
-        "ARCH_MCP_HOST": "host.docker.internal"
-      }
+      "type": "sse",
+      "url": "http://host.docker.internal:{mcp_port}/sse/{agent_id}"
     }
   }
 }
 ```
+The container reaches the host's MCP server via `host.docker.internal` (macOS/Windows) or the docker bridge gateway IP (Linux, set via `--add-host host.docker.internal:host-gateway`).
 
 **Container spawn:**
 ```python
@@ -763,6 +754,7 @@ Each persona is a markdown file written in CLAUDE.md style for that role. The ha
 - For long-running projects, plan one sprint at a time; do not pre-create all issues upfront
 
 *During the session:*
+- Call `update_brief` (section: current_status) as a checkpoint after every sprint milestone, significant merge, or `escalate_to_user` response — not only at shutdown. This ensures recovery points exist throughout long sessions.
 - Spawn agents with `spawn_agent`, then assign them their GitHub issue number in the spawn prompt
 - Agents should reference the issue number in commits (`closes #42`) and PRs
 - Monitor progress via `list_agents`, `get_messages`, and `gh_list_issues`
@@ -811,11 +803,11 @@ Build and verify each layer before building on it:
 1. **State store** (`state.py`) — data model, in-memory dict, JSON flush/load, unit tests
 2. **Worktree manager** (`worktree.py`) — create/list/remove worktrees; test against a real git repo
 3. **Token tracker** (`token_tracker.py`) — parse stream-json fixtures, verify cost calculation, unit tests
-4. **MCP server + proxy** (`mcp_server.py`, `mcp_proxy.py`) — implement all tools, test each tool in isolation, verify MCP protocol compliance
+4. **MCP server** (`mcp_server.py`) — SSE/HTTP server using `mcp` SDK; implement all tools; extract `agent_id` from URL path; test each tool in isolation
 5. **Session manager — local** (`session.py`) — spawn claude subprocess locally, read stream-json output, persist session_id, permissions audit log
-6. **Container manager** (`container.py`) — Docker spawn/teardown, volume mounts, host MCP connectivity; test with a real Docker image
+6. **Container manager** (`container.py`) — Docker spawn/teardown, volume mounts, `host.docker.internal` MCP connectivity; test with a real Docker image
 7. **Session manager — container** — integrate container.py into session.py, unified interface regardless of mode
-8. **Orchestrator** (`orchestrator.py`) — wire all components, startup/shutdown, permission gate, container gate, signal handlers
+8. **Orchestrator** (`orchestrator.py`) — wire all components, startup/shutdown, permission gate, container gate, GitHub gate, signal handlers
 9. **Dashboard** (`dashboard.py`) — Textual layout, live state binding, `[c]`/`[!]` indicators, user input for decisions
 10. **Persona files** — write default personas for: archie, frontend, backend, qa, security, copywriter
 11. **GitHub tools** — implement all `gh_*` MCP tools as `gh` CLI wrappers; test against a real repo; handle missing `gh` gracefully
@@ -835,7 +827,7 @@ Build and verify each layer before building on it:
 - Worktrees must be cleaned up even on crash — register both `atexit` and `SIGINT`/`SIGTERM` handlers in the orchestrator.
 - If an agent subprocess exits unexpectedly (non-zero exit), mark it `"error"` and notify Archie via the message bus.
 - If Archie sends `send_message` to an `agent_id` that hasn't been spawned yet, queue the message — deliver it when that agent comes online.
-- `escalate_to_user` must block Archie's MCP call until the user responds. Implement as an `asyncio.Event` set by the dashboard's keyboard handler.
+- `escalate_to_user` must block Archie's MCP call until the user responds. Implement as an `asyncio.Event` on the MCP server — the SSE handler awaits the event, which the dashboard's keyboard handler sets when the user answers.
 - Dashboard must remain responsive even if an agent subprocess is hanging. Use non-blocking subprocess stdout reads (`asyncio.create_subprocess_exec`).
 - Merges must always use `--no-ff` to preserve branch history and attribution.
 - All timestamps stored as ISO 8601 UTC strings.
