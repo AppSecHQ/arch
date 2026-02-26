@@ -21,6 +21,33 @@ MessageId = str
 TaskId = str
 DecisionId = str
 
+# Valid enum values
+AGENT_STATUSES = frozenset({"idle", "working", "blocked", "waiting_review", "done", "error"})
+TASK_STATUSES = frozenset({"pending", "in_progress", "done"})
+
+
+class InvalidStatusError(ValueError):
+    """Raised when an invalid status value is provided."""
+    pass
+
+
+def validate_agent_status(status: str) -> str:
+    """Validate and return agent status, or raise InvalidStatusError."""
+    if status not in AGENT_STATUSES:
+        raise InvalidStatusError(
+            f"Invalid agent status '{status}'. Must be one of: {', '.join(sorted(AGENT_STATUSES))}"
+        )
+    return status
+
+
+def validate_task_status(status: str) -> str:
+    """Validate and return task status, or raise InvalidStatusError."""
+    if status not in TASK_STATUSES:
+        raise InvalidStatusError(
+            f"Invalid task status '{status}'. Must be one of: {', '.join(sorted(TASK_STATUSES))}"
+        )
+    return status
+
 
 def utc_now() -> str:
     """Return current UTC time as ISO 8601 string."""
@@ -164,7 +191,14 @@ class StateStore:
 
         Returns:
             Updated agent record, or None if not found.
+
+        Raises:
+            InvalidStatusError: If status value is invalid.
         """
+        # Validate status before acquiring lock
+        if "status" in updates:
+            validate_agent_status(updates["status"])
+
         with self._lock:
             if agent_id not in self._state["agents"]:
                 return None
@@ -397,7 +431,14 @@ class StateStore:
 
         Returns:
             Updated task record, or None if not found.
+
+        Raises:
+            InvalidStatusError: If status value is invalid.
         """
+        # Validate status before acquiring lock
+        if "status" in updates:
+            validate_task_status(updates["status"])
+
         with self._lock:
             for task in self._state["tasks"]:
                 if task["id"] == task_id:

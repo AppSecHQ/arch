@@ -8,7 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from arch.state import StateStore, generate_id, utc_now
+from arch.state import (
+    StateStore,
+    generate_id,
+    utc_now,
+    validate_agent_status,
+    validate_task_status,
+    InvalidStatusError,
+    AGENT_STATUSES,
+    TASK_STATUSES,
+)
 
 
 class TestUtilityFunctions:
@@ -28,6 +37,67 @@ class TestUtilityFunctions:
     def test_generate_id_is_8_chars(self):
         """generate_id produces 8-character IDs."""
         assert len(generate_id()) == 8
+
+
+class TestEnumValidation:
+    """Tests for status enum validation."""
+
+    def test_valid_agent_statuses(self):
+        """All valid agent statuses pass validation."""
+        for status in AGENT_STATUSES:
+            assert validate_agent_status(status) == status
+
+    def test_invalid_agent_status_raises(self):
+        """Invalid agent status raises InvalidStatusError."""
+        with pytest.raises(InvalidStatusError, match="Invalid agent status"):
+            validate_agent_status("invalid_status")
+
+    def test_valid_task_statuses(self):
+        """All valid task statuses pass validation."""
+        for status in TASK_STATUSES:
+            assert validate_task_status(status) == status
+
+    def test_invalid_task_status_raises(self):
+        """Invalid task status raises InvalidStatusError."""
+        with pytest.raises(InvalidStatusError, match="Invalid task status"):
+            validate_task_status("invalid_status")
+
+    def test_update_agent_validates_status(self, state_store):
+        """update_agent validates status before updating."""
+        state_store.register_agent("test", "role", "/wt")
+
+        with pytest.raises(InvalidStatusError):
+            state_store.update_agent("test", status="bad_status")
+
+        # Agent should be unchanged
+        assert state_store.get_agent("test")["status"] == "idle"
+
+    def test_update_agent_valid_status(self, state_store):
+        """update_agent accepts valid status values."""
+        state_store.register_agent("test", "role", "/wt")
+
+        for status in AGENT_STATUSES:
+            result = state_store.update_agent("test", status=status)
+            assert result["status"] == status
+
+    def test_update_task_validates_status(self, state_store):
+        """update_task validates status before updating."""
+        task = state_store.add_task("agent", "description")
+
+        with pytest.raises(InvalidStatusError):
+            state_store.update_task(task["id"], status="bad_status")
+
+        # Task should be unchanged
+        tasks = state_store.get_tasks()
+        assert tasks[0]["status"] == "pending"
+
+    def test_update_task_valid_status(self, state_store):
+        """update_task accepts valid status values."""
+        task = state_store.add_task("agent", "description")
+
+        for status in TASK_STATUSES:
+            result = state_store.update_task(task["id"], status=status)
+            assert result["status"] == status
 
 
 class TestStateStoreProject:

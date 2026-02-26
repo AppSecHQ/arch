@@ -1,0 +1,1082 @@
+"""
+ARCH MCP Server
+
+SSE/HTTP server providing MCP tools for agent coordination.
+Agents connect via /sse/{agent_id} - the agent_id is extracted from the URL path.
+Access controls enforce Archie-only tools vs worker tools.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional, Awaitable
+
+from mcp.server import Server
+from mcp.server.sse import SseServerTransport
+from mcp.types import Tool, TextContent
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.responses import Response
+import uvicorn
+
+from arch.state import StateStore, AGENT_STATUSES
+
+logger = logging.getLogger(__name__)
+
+
+# --- Tool Definitions ---
+
+# Tools available to ALL agents
+WORKER_TOOLS = [
+    Tool(
+        name="send_message",
+        description="Send a message to another agent or to Archie",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "agent_id of recipient, 'archie', or 'broadcast'"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "message body"
+                }
+            },
+            "required": ["to", "content"]
+        }
+    ),
+    Tool(
+        name="get_messages",
+        description="Retrieve messages addressed to you",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "since_id": {
+                    "type": "string",
+                    "description": "optional: only return messages newer than this ID"
+                }
+            }
+        }
+    ),
+    Tool(
+        name="update_status",
+        description="Report your current task and status to the harness (shown in dashboard)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "what you are currently doing"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": list(AGENT_STATUSES),
+                    "description": "idle | working | blocked | waiting_review | done | error"
+                }
+            },
+            "required": ["task", "status"]
+        }
+    ),
+    Tool(
+        name="report_completion",
+        description="Signal that your assigned work is complete",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "what was accomplished"
+                },
+                "artifacts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "list of files created or modified"
+                }
+            },
+            "required": ["summary", "artifacts"]
+        }
+    ),
+]
+
+# Tools available ONLY to Archie
+ARCHIE_ONLY_TOOLS = [
+    Tool(
+        name="spawn_agent",
+        description="Spawn a new agent from the configured agent pool",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": "must match an id in agent_pool config"
+                },
+                "assignment": {
+                    "type": "string",
+                    "description": "task description given to agent at spawn"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "optional additional context injected into agent's CLAUDE.md"
+                },
+                "skip_permissions": {
+                    "type": "boolean",
+                    "description": "request --dangerously-skip-permissions (requires config)"
+                }
+            },
+            "required": ["role", "assignment"]
+        }
+    ),
+    Tool(
+        name="teardown_agent",
+        description="Shut down an agent and remove its worktree",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "reason": {"type": "string"}
+            },
+            "required": ["agent_id"]
+        }
+    ),
+    Tool(
+        name="list_agents",
+        description="Get current status of all active agents",
+        inputSchema={
+            "type": "object",
+            "properties": {}
+        }
+    ),
+    Tool(
+        name="escalate_to_user",
+        description="Surface a question or decision to the human user. BLOCKS until answered.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "question shown in dashboard"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "optional list of choices"
+                }
+            },
+            "required": ["question"]
+        }
+    ),
+    Tool(
+        name="request_merge",
+        description="Request merging an agent's worktree branch into target branch",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "whose worktree to merge"
+                },
+                "target_branch": {
+                    "type": "string",
+                    "description": "merge destination (default: main)"
+                },
+                "pr_title": {
+                    "type": "string",
+                    "description": "if provided, creates a GitHub PR instead of local merge"
+                },
+                "pr_body": {"type": "string"}
+            },
+            "required": ["agent_id"]
+        }
+    ),
+    Tool(
+        name="get_project_context",
+        description="Get current project state: repo info, active agents, git status, and full BRIEF.md contents",
+        inputSchema={
+            "type": "object",
+            "properties": {}
+        }
+    ),
+    Tool(
+        name="close_project",
+        description="Signal that the project work is complete. Initiates graceful shutdown.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"}
+            },
+            "required": ["summary"]
+        }
+    ),
+    Tool(
+        name="update_brief",
+        description="Update a section of BRIEF.md. Use for Decisions Log entries and Current Status updates.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "enum": ["current_status", "decisions_log"],
+                    "description": "which section to update"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "For current_status: full replacement text. For decisions_log: new row."
+                }
+            },
+            "required": ["section", "content"]
+        }
+    ),
+]
+
+# GitHub tools (Archie only)
+GITHUB_TOOLS = [
+    Tool(
+        name="gh_create_issue",
+        description="Create a GitHub issue. Use for every discrete task assigned to an agent.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "milestone": {"type": "string"},
+                "assignee": {"type": "string"}
+            },
+            "required": ["title", "body"]
+        }
+    ),
+    Tool(
+        name="gh_list_issues",
+        description="List GitHub issues with optional filters.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "milestone": {"type": "string"},
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"]
+                },
+                "limit": {"type": "integer"}
+            }
+        }
+    ),
+    Tool(
+        name="gh_close_issue",
+        description="Close a GitHub issue, optionally referencing the PR that resolves it.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_number": {"type": "integer"},
+                "comment": {"type": "string"}
+            },
+            "required": ["issue_number"]
+        }
+    ),
+    Tool(
+        name="gh_update_issue",
+        description="Update an issue's labels, milestone, or assignee.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_number": {"type": "integer"},
+                "add_labels": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "remove_labels": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "milestone": {"type": "string"},
+                "assignee": {"type": "string"}
+            },
+            "required": ["issue_number"]
+        }
+    ),
+    Tool(
+        name="gh_add_comment",
+        description="Add a comment to a GitHub issue.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_number": {"type": "integer"},
+                "body": {"type": "string"}
+            },
+            "required": ["issue_number", "body"]
+        }
+    ),
+    Tool(
+        name="gh_create_milestone",
+        description="Create a GitHub milestone representing a sprint or phase.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "due_date": {"type": "string"}
+            },
+            "required": ["title"]
+        }
+    ),
+    Tool(
+        name="gh_list_milestones",
+        description="List open GitHub milestones (sprints/phases).",
+        inputSchema={
+            "type": "object",
+            "properties": {}
+        }
+    ),
+]
+
+
+class MCPServer:
+    """
+    ARCH MCP Server with SSE transport.
+
+    Provides tools for agent coordination, message passing, and GitHub integration.
+    Enforces access controls based on agent_id (Archie vs workers).
+    """
+
+    def __init__(
+        self,
+        state: StateStore,
+        port: int = 3999,
+        repo_path: Optional[Path] = None,
+        github_repo: Optional[str] = None,
+        on_spawn_agent: Optional[Callable[..., Awaitable[dict[str, Any]]]] = None,
+        on_teardown_agent: Optional[Callable[[str], Awaitable[bool]]] = None,
+        on_request_merge: Optional[Callable[..., Awaitable[dict[str, Any]]]] = None,
+        on_close_project: Optional[Callable[[str], Awaitable[bool]]] = None,
+    ):
+        """
+        Initialize the MCP server.
+
+        Args:
+            state: StateStore instance for shared state.
+            port: Port to listen on.
+            repo_path: Path to git repository root.
+            github_repo: GitHub repo in "owner/repo" format (enables GitHub tools).
+            on_spawn_agent: Callback to spawn an agent (orchestrator handles this).
+            on_teardown_agent: Callback to teardown an agent.
+            on_request_merge: Callback to handle merge requests.
+            on_close_project: Callback to handle project close.
+        """
+        self.state = state
+        self.port = port
+        self.repo_path = Path(repo_path) if repo_path else None
+        self.github_repo = github_repo
+
+        # Callbacks for orchestrator actions
+        self.on_spawn_agent = on_spawn_agent
+        self.on_teardown_agent = on_teardown_agent
+        self.on_request_merge = on_request_merge
+        self.on_close_project = on_close_project
+
+        # Pending escalations: decision_id -> asyncio.Event
+        self._pending_escalations: dict[str, asyncio.Event] = {}
+
+        # Track connected agents for each SSE session
+        self._agent_sessions: dict[str, str] = {}
+
+        # Build tool lists
+        self._worker_tool_names = {t.name for t in WORKER_TOOLS}
+        self._archie_tool_names = self._worker_tool_names | {t.name for t in ARCHIE_ONLY_TOOLS}
+
+        if self.github_repo:
+            self._archie_tool_names |= {t.name for t in GITHUB_TOOLS}
+
+    def _is_archie(self, agent_id: str) -> bool:
+        """Check if agent_id is Archie."""
+        return agent_id == "archie"
+
+    def _get_tools_for_agent(self, agent_id: str) -> list[Tool]:
+        """Get the list of tools available to an agent."""
+        if self._is_archie(agent_id):
+            tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS
+            if self.github_repo:
+                tools = tools + GITHUB_TOOLS
+            return tools
+        return WORKER_TOOLS
+
+    def _check_tool_access(self, agent_id: str, tool_name: str) -> bool:
+        """Check if an agent has access to a tool."""
+        if self._is_archie(agent_id):
+            return tool_name in self._archie_tool_names
+        return tool_name in self._worker_tool_names
+
+    # --- Tool Implementations ---
+
+    async def _handle_send_message(
+        self,
+        agent_id: str,
+        to: str,
+        content: str
+    ) -> dict[str, Any]:
+        """Handle send_message tool."""
+        message = self.state.add_message(agent_id, to, content)
+        return {
+            "message_id": message["id"],
+            "timestamp": message["timestamp"]
+        }
+
+    async def _handle_get_messages(
+        self,
+        agent_id: str,
+        since_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle get_messages tool."""
+        messages, cursor = self.state.get_messages(agent_id, since_id)
+        return {
+            "messages": messages,
+            "cursor": cursor
+        }
+
+    async def _handle_update_status(
+        self,
+        agent_id: str,
+        task: str,
+        status: str
+    ) -> dict[str, Any]:
+        """Handle update_status tool."""
+        result = self.state.update_agent(agent_id, task=task, status=status)
+        return {"ok": result is not None}
+
+    async def _handle_report_completion(
+        self,
+        agent_id: str,
+        summary: str,
+        artifacts: list[str]
+    ) -> dict[str, Any]:
+        """Handle report_completion tool."""
+        # Update agent status
+        self.state.update_agent(agent_id, status="done", task=summary)
+
+        # Send completion message to Archie
+        self.state.add_message(
+            agent_id,
+            "archie",
+            f"Work complete: {summary}\nArtifacts: {', '.join(artifacts)}"
+        )
+
+        return {"ok": True}
+
+    async def _handle_spawn_agent(
+        self,
+        role: str,
+        assignment: str,
+        context: Optional[str] = None,
+        skip_permissions: bool = False
+    ) -> dict[str, Any]:
+        """Handle spawn_agent tool (Archie only)."""
+        if self.on_spawn_agent is None:
+            return {"error": "spawn_agent callback not configured"}
+
+        result = await self.on_spawn_agent(
+            role=role,
+            assignment=assignment,
+            context=context,
+            skip_permissions=skip_permissions
+        )
+        return result
+
+    async def _handle_teardown_agent(
+        self,
+        agent_id: str,
+        reason: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle teardown_agent tool (Archie only)."""
+        if self.on_teardown_agent is None:
+            return {"error": "teardown_agent callback not configured"}
+
+        # Notify the agent first
+        if reason:
+            self.state.add_message("archie", agent_id, f"Shutting down: {reason}")
+
+        result = await self.on_teardown_agent(agent_id)
+        return {"ok": result}
+
+    async def _handle_list_agents(self) -> dict[str, Any]:
+        """Handle list_agents tool (Archie only)."""
+        agents = self.state.list_agents()
+        return {
+            "agents": [
+                {
+                    "id": a["id"],
+                    "role": a["role"],
+                    "status": a["status"],
+                    "task": a["task"],
+                    "tokens_used": a["usage"].get("input_tokens", 0) + a["usage"].get("output_tokens", 0),
+                    "cost_usd": a["usage"].get("cost_usd", 0.0)
+                }
+                for a in agents
+            ]
+        }
+
+    async def _handle_escalate_to_user(
+        self,
+        question: str,
+        options: Optional[list[str]] = None
+    ) -> dict[str, Any]:
+        """
+        Handle escalate_to_user tool (Archie only).
+
+        BLOCKS until user answers via the dashboard.
+        """
+        # Create pending decision
+        decision = self.state.add_pending_decision(question, options)
+        decision_id = decision["id"]
+
+        # Create event for blocking
+        event = asyncio.Event()
+        self._pending_escalations[decision_id] = event
+
+        logger.info(f"Escalation {decision_id}: waiting for user answer")
+
+        # Block until answered
+        await event.wait()
+
+        # Clean up
+        del self._pending_escalations[decision_id]
+
+        # Get the answer
+        decisions = [
+            d for d in self.state._state["pending_user_decisions"]
+            if d["id"] == decision_id
+        ]
+
+        if decisions and decisions[0]["answer"]:
+            return {"answer": decisions[0]["answer"]}
+        else:
+            return {"answer": "", "error": "No answer received"}
+
+    def answer_escalation(self, decision_id: str, answer: str) -> bool:
+        """
+        Answer a pending escalation (called by dashboard).
+
+        Returns True if the escalation was found and answered.
+        """
+        if self.state.answer_decision(decision_id, answer):
+            # Signal the waiting coroutine
+            if decision_id in self._pending_escalations:
+                self._pending_escalations[decision_id].set()
+                return True
+        return False
+
+    async def _handle_request_merge(
+        self,
+        agent_id: str,
+        target_branch: str = "main",
+        pr_title: Optional[str] = None,
+        pr_body: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle request_merge tool (Archie only)."""
+        if self.on_request_merge is None:
+            return {"error": "request_merge callback not configured"}
+
+        result = await self.on_request_merge(
+            agent_id=agent_id,
+            target_branch=target_branch,
+            pr_title=pr_title,
+            pr_body=pr_body
+        )
+        return result
+
+    async def _handle_get_project_context(self) -> dict[str, Any]:
+        """Handle get_project_context tool (Archie only)."""
+        project = self.state.get_project()
+        agents = self.state.list_agents()
+
+        # Read BRIEF.md if available
+        brief_content = ""
+        if self.repo_path:
+            brief_path = self.repo_path / "BRIEF.md"
+            if brief_path.exists():
+                brief_content = brief_path.read_text()
+
+        # Get git status
+        git_status = ""
+        if self.repo_path:
+            try:
+                result = subprocess.run(
+                    ["git", "status", "--short"],
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                git_status = result.stdout
+            except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+                git_status = "(git status unavailable)"
+
+        # List open worktrees
+        open_worktrees = []
+        if self.repo_path:
+            worktree_dir = self.repo_path / ".worktrees"
+            if worktree_dir.exists():
+                open_worktrees = [d.name for d in worktree_dir.iterdir() if d.is_dir()]
+
+        return {
+            "name": project.get("name", ""),
+            "description": project.get("description", ""),
+            "repo_path": str(self.repo_path) if self.repo_path else "",
+            "active_agents": [{"id": a["id"], "role": a["role"], "status": a["status"]} for a in agents],
+            "git_status": git_status,
+            "open_worktrees": open_worktrees,
+            "brief": brief_content
+        }
+
+    async def _handle_close_project(self, summary: str) -> dict[str, Any]:
+        """Handle close_project tool (Archie only)."""
+        if self.on_close_project is None:
+            return {"error": "close_project callback not configured"}
+
+        result = await self.on_close_project(summary)
+        return {"ok": result}
+
+    async def _handle_update_brief(
+        self,
+        section: str,
+        content: str
+    ) -> dict[str, Any]:
+        """Handle update_brief tool (Archie only)."""
+        if not self.repo_path:
+            return {"ok": False, "error": "repo_path not configured"}
+
+        brief_path = self.repo_path / "BRIEF.md"
+
+        if not brief_path.exists():
+            return {"ok": False, "error": "BRIEF.md not found"}
+
+        try:
+            brief_content = brief_path.read_text()
+
+            if section == "current_status":
+                # Replace the Current Status section
+                import re
+                pattern = r"(## Current Status\n).*?(?=\n## |\Z)"
+                replacement = f"\\1{content}\n"
+                new_content = re.sub(pattern, replacement, brief_content, flags=re.DOTALL)
+
+            elif section == "decisions_log":
+                # Append to Decisions Log table
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                new_row = f"| {today} | {content} |"
+
+                # Find the table and append
+                lines = brief_content.split("\n")
+                new_lines = []
+                in_decisions = False
+
+                for line in lines:
+                    new_lines.append(line)
+                    if "## Decisions Log" in line:
+                        in_decisions = True
+                    elif in_decisions and line.startswith("|") and "---" in line:
+                        # After the header separator, append the new row
+                        new_lines.append(new_row)
+                        in_decisions = False
+
+                new_content = "\n".join(new_lines)
+
+            else:
+                return {"ok": False, "error": f"Unknown section: {section}"}
+
+            brief_path.write_text(new_content)
+            return {"ok": True}
+
+        except Exception as e:
+            logger.error(f"Failed to update BRIEF.md: {e}")
+            return {"ok": False, "error": str(e)}
+
+    # --- GitHub Tool Implementations ---
+
+    async def _handle_gh_create_issue(
+        self,
+        title: str,
+        body: str,
+        labels: Optional[list[str]] = None,
+        milestone: Optional[str] = None,
+        assignee: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle gh_create_issue tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = ["gh", "issue", "create", "--repo", self.github_repo, "--title", title, "--body", body]
+
+        if labels:
+            cmd.extend(["--label", ",".join(labels)])
+        if milestone:
+            cmd.extend(["--milestone", milestone])
+        if assignee:
+            cmd.extend(["--assignee", assignee])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                return {"error": result.stderr}
+
+            # Parse the URL to extract issue number
+            url = result.stdout.strip()
+            issue_number = int(url.split("/")[-1]) if url else 0
+
+            return {"issue_number": issue_number, "url": url}
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_list_issues(
+        self,
+        labels: Optional[list[str]] = None,
+        milestone: Optional[str] = None,
+        state: str = "open",
+        limit: int = 30
+    ) -> dict[str, Any]:
+        """Handle gh_list_issues tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = [
+            "gh", "issue", "list", "--repo", self.github_repo,
+            "--json", "number,title,labels,state,assignees,url",
+            "--state", state,
+            "--limit", str(limit)
+        ]
+
+        if labels:
+            for label in labels:
+                cmd.extend(["--label", label])
+        if milestone:
+            cmd.extend(["--milestone", milestone])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                return {"error": result.stderr}
+
+            issues = json.loads(result.stdout) if result.stdout else []
+
+            # Transform to match spec format
+            return {
+                "issues": [
+                    {
+                        "number": i["number"],
+                        "title": i["title"],
+                        "labels": [l["name"] for l in i.get("labels", [])],
+                        "state": i["state"],
+                        "assignee": i.get("assignees", [{}])[0].get("login") if i.get("assignees") else None,
+                        "url": i["url"]
+                    }
+                    for i in issues
+                ]
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_close_issue(
+        self,
+        issue_number: int,
+        comment: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle gh_close_issue tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = ["gh", "issue", "close", str(issue_number), "--repo", self.github_repo]
+
+        if comment:
+            cmd.extend(["--comment", comment])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return {"ok": result.returncode == 0, "error": result.stderr if result.returncode != 0 else None}
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_update_issue(
+        self,
+        issue_number: int,
+        add_labels: Optional[list[str]] = None,
+        remove_labels: Optional[list[str]] = None,
+        milestone: Optional[str] = None,
+        assignee: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle gh_update_issue tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = ["gh", "issue", "edit", str(issue_number), "--repo", self.github_repo]
+
+        if add_labels:
+            cmd.extend(["--add-label", ",".join(add_labels)])
+        if remove_labels:
+            cmd.extend(["--remove-label", ",".join(remove_labels)])
+        if milestone:
+            cmd.extend(["--milestone", milestone])
+        if assignee:
+            cmd.extend(["--add-assignee", assignee])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return {"ok": result.returncode == 0, "error": result.stderr if result.returncode != 0 else None}
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_add_comment(
+        self,
+        issue_number: int,
+        body: str
+    ) -> dict[str, Any]:
+        """Handle gh_add_comment tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = ["gh", "issue", "comment", str(issue_number), "--repo", self.github_repo, "--body", body]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return {"ok": result.returncode == 0, "error": result.stderr if result.returncode != 0 else None}
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_create_milestone(
+        self,
+        title: str,
+        description: Optional[str] = None,
+        due_date: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Handle gh_create_milestone tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        # gh CLI doesn't have direct milestone create, use API
+        cmd = [
+            "gh", "api", f"repos/{self.github_repo}/milestones",
+            "-X", "POST",
+            "-f", f"title={title}"
+        ]
+
+        if description:
+            cmd.extend(["-f", f"description={description}"])
+        if due_date:
+            cmd.extend(["-f", f"due_on={due_date}T00:00:00Z"])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                return {"error": result.stderr}
+
+            data = json.loads(result.stdout) if result.stdout else {}
+            return {
+                "milestone_number": data.get("number"),
+                "url": data.get("html_url", "")
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_gh_list_milestones(self) -> dict[str, Any]:
+        """Handle gh_list_milestones tool."""
+        if not self.github_repo:
+            return {"error": "GitHub not configured"}
+
+        cmd = [
+            "gh", "api", f"repos/{self.github_repo}/milestones",
+            "--jq", ".[].{number, title, open_issues, closed_issues, due_on, html_url}"
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                return {"error": result.stderr}
+
+            # Parse JSONL output
+            milestones = []
+            for line in result.stdout.strip().split("\n"):
+                if line:
+                    m = json.loads(line)
+                    milestones.append({
+                        "number": m.get("number"),
+                        "title": m.get("title"),
+                        "open_issues": m.get("open_issues"),
+                        "closed_issues": m.get("closed_issues"),
+                        "due_date": m.get("due_on"),
+                        "url": m.get("html_url", "")
+                    })
+
+            return {"milestones": milestones}
+
+        except subprocess.TimeoutExpired:
+            return {"error": "Command timed out"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    # --- Tool Dispatch ---
+
+    async def _handle_tool_call(
+        self,
+        agent_id: str,
+        tool_name: str,
+        arguments: dict[str, Any]
+    ) -> Any:
+        """Dispatch a tool call to the appropriate handler."""
+        # Check access
+        if not self._check_tool_access(agent_id, tool_name):
+            return {"error": f"Access denied: {tool_name} is not available to {agent_id}"}
+
+        # Worker tools
+        if tool_name == "send_message":
+            return await self._handle_send_message(agent_id, **arguments)
+        elif tool_name == "get_messages":
+            return await self._handle_get_messages(agent_id, **arguments)
+        elif tool_name == "update_status":
+            return await self._handle_update_status(agent_id, **arguments)
+        elif tool_name == "report_completion":
+            return await self._handle_report_completion(agent_id, **arguments)
+
+        # Archie-only tools
+        elif tool_name == "spawn_agent":
+            return await self._handle_spawn_agent(**arguments)
+        elif tool_name == "teardown_agent":
+            return await self._handle_teardown_agent(**arguments)
+        elif tool_name == "list_agents":
+            return await self._handle_list_agents()
+        elif tool_name == "escalate_to_user":
+            return await self._handle_escalate_to_user(**arguments)
+        elif tool_name == "request_merge":
+            return await self._handle_request_merge(**arguments)
+        elif tool_name == "get_project_context":
+            return await self._handle_get_project_context()
+        elif tool_name == "close_project":
+            return await self._handle_close_project(**arguments)
+        elif tool_name == "update_brief":
+            return await self._handle_update_brief(**arguments)
+
+        # GitHub tools
+        elif tool_name == "gh_create_issue":
+            return await self._handle_gh_create_issue(**arguments)
+        elif tool_name == "gh_list_issues":
+            return await self._handle_gh_list_issues(**arguments)
+        elif tool_name == "gh_close_issue":
+            return await self._handle_gh_close_issue(**arguments)
+        elif tool_name == "gh_update_issue":
+            return await self._handle_gh_update_issue(**arguments)
+        elif tool_name == "gh_add_comment":
+            return await self._handle_gh_add_comment(**arguments)
+        elif tool_name == "gh_create_milestone":
+            return await self._handle_gh_create_milestone(**arguments)
+        elif tool_name == "gh_list_milestones":
+            return await self._handle_gh_list_milestones()
+
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    # --- Server Setup ---
+
+    def create_mcp_server(self, agent_id: str) -> Server:
+        """Create an MCP Server instance for a specific agent."""
+        server = Server(f"arch-{agent_id}")
+
+        @server.list_tools()
+        async def list_tools() -> list[Tool]:
+            return self._get_tools_for_agent(agent_id)
+
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+            result = await self._handle_tool_call(agent_id, name, arguments)
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        return server
+
+    def create_app(self) -> Starlette:
+        """Create the Starlette ASGI application with SSE endpoints."""
+
+        async def handle_sse(request):
+            """Handle SSE connection for an agent."""
+            agent_id = request.path_params.get("agent_id", "unknown")
+            logger.info(f"SSE connection from agent: {agent_id}")
+
+            # Create MCP server for this agent
+            mcp_server = self.create_mcp_server(agent_id)
+
+            # Create SSE transport
+            transport = SseServerTransport("/messages/")
+
+            # Handle the SSE connection
+            async with transport.connect_sse(
+                request.scope,
+                request.receive,
+                request._send
+            ) as (read_stream, write_stream):
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options()
+                )
+
+            return Response()
+
+        async def handle_messages(request):
+            """Handle POST messages for SSE transport."""
+            agent_id = request.path_params.get("agent_id", "unknown")
+
+            # Get the MCP server for this agent
+            mcp_server = self.create_mcp_server(agent_id)
+            transport = SseServerTransport("/messages/")
+
+            body = await request.body()
+
+            # Process the message
+            # Note: This is simplified - actual implementation depends on MCP SDK internals
+            return Response(status_code=202)
+
+        routes = [
+            Route("/sse/{agent_id}", handle_sse),
+            Route("/messages/{agent_id}", handle_messages, methods=["POST"]),
+        ]
+
+        return Starlette(routes=routes)
+
+    async def start(self):
+        """Start the MCP server."""
+        app = self.create_app()
+        config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    def run(self):
+        """Run the MCP server (blocking)."""
+        asyncio.run(self.start())
