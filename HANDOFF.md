@@ -2,11 +2,11 @@
 
 ## Current State
 
-**Steps Completed: 1-6 of 13**
-**Tests: 224 passing**
-**Last Commit:** `c045051` (Step 5 - Session Manager)
+**Steps Completed: 1-7 of 13**
+**Tests: 240 passing**
+**Last Commit:** `7862953` (Step 6 - Container Manager)
 
-Step 6 (Container Manager) is complete but not yet committed.
+Step 7 (Session/Container integration) is complete but not yet committed.
 
 ## Completed Components
 
@@ -18,14 +18,39 @@ Step 6 (Container Manager) is complete but not yet committed.
 | 4 | `arch/mcp_server.py` | SSE/HTTP MCP server, access controls, all tools | 40 |
 | 5 | `arch/session.py` | Local claude subprocess, output parsing, resume | 34 |
 | 6 | `arch/container.py` | Docker spawn/stop, volume mounts, Dockerfile | 40 |
+| 7 | `arch/session.py` | Unified Session/Container interface, stream parsing for containers | 16 |
+
+## Step 7 Implementation Details
+
+### What was built:
+- `ContainerizedSession` class in `session.py` - wraps `ContainerSession` with stream parsing + token tracking
+- `SessionManager.spawn()` now checks `AgentConfig.sandboxed`:
+  - `sandboxed=False` → creates local `Session`
+  - `sandboxed=True` → creates `ContainerizedSession`
+- `AnySession` type alias for `Session | ContainerizedSession`
+- New methods: `list_local_sessions()`, `list_containerized_sessions()`, `is_containerized()`
+
+### Key patterns:
+- Both `Session` and `ContainerizedSession` share same interface: `spawn()`, `stop()`, `is_running`, `session_id`, `agent_id`
+- Stream parsing via `StreamParser` works identically for both session types
+- Token tracking unified through `TokenTracker.register_agent()`
+- State updates include `container_name` and `sandboxed` flags for containerized agents
 
 ## Next Steps
 
-### Step 7: Session Manager (container integration)
-Integrate `container.py` into `session.py` for unified interface. When `AgentConfig.sandboxed=True`, delegate to `ContainerSession` instead of local subprocess.
+### Step 8: Orchestrator (`arch/orchestrator.py`)
+Wire all components, startup/shutdown, signal handlers:
+- Parse and validate `archie.yaml`
+- Initialize state store
+- Permission gate: confirm `skip_permissions` usage
+- Container gate: verify Docker if any agent has `sandbox.enabled`
+- GitHub gate: verify `gh` auth if `github.repo` is set
+- Start MCP server
+- Create Archie's worktree and spawn Archie session
+- Start dashboard
+- Signal handlers for graceful shutdown (`SIGINT`, `SIGTERM`, `atexit`)
 
-### Steps 8-13 (Remaining)
-8. **Orchestrator** - Wire all components, startup/shutdown, signal handlers
+### Steps 9-13 (Remaining)
 9. **Dashboard** - Textual TUI, live state, user input for escalations
 10. **Persona files** - archie.md, frontend.md, backend.md, qa.md, security.md, copywriter.md
 11. **GitHub tools** - Already implemented in MCP server, just need integration tests
@@ -49,7 +74,7 @@ arch/
 │   ├── worktree.py         # ✅ Step 2
 │   ├── token_tracker.py    # ✅ Step 3
 │   ├── mcp_server.py       # ✅ Step 4
-│   ├── session.py          # ✅ Step 5
+│   ├── session.py          # ✅ Steps 5 + 7
 │   ├── container.py        # ✅ Step 6
 │   ├── orchestrator.py     # Step 8
 │   └── dashboard.py        # Step 9
@@ -69,9 +94,10 @@ arch/
 
 ### Session Management
 - `Session` class handles local subprocess
-- `ContainerSession` class handles Docker containers
+- `ContainerizedSession` class wraps `ContainerSession` + adds parsing
 - Both parse stream-json output via `StreamParser`
 - Session ID extracted from `result` event for resume
+- `SessionManager.spawn()` auto-delegates based on `sandboxed` flag
 
 ### State Store
 - In-memory dict with automatic JSON flush
@@ -94,10 +120,10 @@ python -m pytest tests/ -v
 
 ## Commit Pending
 
-Step 6 files need to be committed:
+Step 7 files need to be committed:
 ```bash
-git add arch/container.py tests/test_container.py
-git commit -m "Add container manager implementation (Step 6)"
+git add arch/session.py tests/test_session.py HANDOFF.md
+git commit -m "Add session/container integration (Step 7)"
 git push origin main
 ```
 
@@ -110,7 +136,7 @@ from arch.state import StateStore
 from arch.worktree import WorktreeManager
 from arch.token_tracker import TokenTracker
 from arch.mcp_server import MCPServer
-from arch.session import Session, SessionManager
+from arch.session import Session, ContainerizedSession, SessionManager, AnySession
 from arch.container import ContainerManager
 print('All modules import successfully')
 "

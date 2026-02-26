@@ -11,12 +11,15 @@ import pytest
 from arch.session import (
     AgentConfig,
     Session,
+    ContainerizedSession,
     SessionManager,
+    AnySession,
     generate_mcp_config,
     log_permissions_audit,
 )
 from arch.state import StateStore
 from arch.token_tracker import TokenTracker
+from arch.container import ContainerConfig, ContainerSession
 
 
 class TestAgentConfig:
@@ -489,6 +492,309 @@ class TestSessionManager:
         assert "to-remove" not in session_manager._sessions
 
 
+class TestContainerizedSession:
+    """Tests for ContainerizedSession class."""
+
+    def test_session_properties(self, containerized_session):
+        """ContainerizedSession exposes correct properties."""
+        assert containerized_session.agent_id == "container-agent"
+        assert containerized_session.is_running is False
+        assert containerized_session.session_id is None
+        assert containerized_session.pid is None  # Containers don't expose PID
+        assert containerized_session.container_name is None  # Before spawn
+
+    @pytest.mark.asyncio
+    async def test_spawn_uses_container_session(
+        self, containerized_session, mock_docker_available, mock_subprocess
+    ):
+        """spawn() creates a ContainerSession."""
+        with patch("arch.container.check_image_exists", return_value=True):
+            await containerized_session.spawn("Build the navbar")
+
+        assert containerized_session._container_session is not None
+        assert containerized_session.is_running is True
+
+    @pytest.mark.asyncio
+    async def test_spawn_generates_container_mcp_config(
+        self, containerized_session, mock_docker_available, mock_subprocess, tmp_path
+    ):
+        """spawn() generates MCP config with host.docker.internal."""
+        with patch("arch.container.check_image_exists", return_value=True):
+            await containerized_session.spawn("Build something")
+
+        # Check config was generated with container hostname
+        config_path = tmp_path / "container-agent-mcp.json"
+        assert config_path.exists()
+
+        import json
+        config = json.loads(config_path.read_text())
+        assert "host.docker.internal" in config["mcpServers"]["arch"]["url"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_registers_with_token_tracker(
+        self, containerized_session, mock_docker_available, mock_subprocess
+    ):
+        """spawn() registers agent with token tracker."""
+        with patch("arch.container.check_image_exists", return_value=True):
+            await containerized_session.spawn("Build something")
+
+        usage = containerized_session.token_tracker.get_agent_usage("container-agent")
+        assert usage is not None
+
+    @pytest.mark.asyncio
+    async def test_spawn_updates_state_with_container_name(
+        self, containerized_session, mock_docker_available, mock_subprocess
+    ):
+        """spawn() updates state with container_name and sandboxed flag."""
+        containerized_session.state.register_agent("container-agent", "test", "/wt")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await containerized_session.spawn("Build something")
+
+        agent = containerized_session.state.get_agent("container-agent")
+        assert agent["status"] == "working"
+        assert agent["sandboxed"] is True
+        assert "container_name" in agent
+
+    @pytest.mark.asyncio
+    async def test_spawn_logs_permissions_audit(
+        self, state, token_tracker, tmp_path, mock_docker_available, mock_subprocess
+    ):
+        """spawn() logs permissions audit when skip_permissions=True."""
+        config = AgentConfig(
+            agent_id="secure-container",
+            role="security",
+            sandboxed=True,
+            skip_permissions=True,
+            worktree=str(tmp_path / "wt"),
+        )
+        session = ContainerizedSession(config, state, token_tracker, tmp_path, 3999)
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await session.spawn("Audit code")
+
+        audit_path = tmp_path / "permissions_audit.log"
+        assert audit_path.exists()
+        assert "secure-container" in audit_path.read_text()
+
+    @pytest.mark.asyncio
+    async def test_parses_usage_events(
+        self, containerized_session, mock_docker_available
+    ):
+        """ContainerizedSession parses usage events and tracks tokens."""
+        usage_event = json.dumps({
+            "type": "usage",
+            "input_tokens": 2000,
+            "output_tokens": 800,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 100
+        })
+
+        mock_process = create_mock_process([usage_event])
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = mock_process
+                await containerized_session.spawn("Build something")
+
+        # Wait for output processing
+        await asyncio.sleep(0.1)
+
+        usage = containerized_session.token_tracker.get_agent_usage("container-agent")
+        assert usage["input_tokens"] == 2000
+        assert usage["output_tokens"] == 800
+
+    @pytest.mark.asyncio
+    async def test_extracts_session_id_from_result(
+        self, containerized_session, mock_docker_available
+    ):
+        """ContainerizedSession extracts session_id from result event."""
+        result_event = json.dumps({
+            "type": "result",
+            "session_id": "container-session-xyz"
+        })
+
+        mock_process = create_mock_process([result_event])
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = mock_process
+                await containerized_session.spawn("Build something")
+
+        await asyncio.sleep(0.1)
+
+        assert containerized_session.session_id == "container-session-xyz"
+
+    @pytest.mark.asyncio
+    async def test_stop_stops_container(
+        self, containerized_session, mock_docker_available, mock_subprocess
+    ):
+        """stop() stops the Docker container."""
+        with patch("arch.container.check_image_exists", return_value=True):
+            await containerized_session.spawn("Test")
+
+        # Create new mock for docker stop
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = create_mock_process()
+            result = await containerized_session.stop(timeout=1)
+
+        assert result is True
+        assert containerized_session.is_running is False
+
+
+class TestSessionManagerContainerIntegration:
+    """Tests for SessionManager with container support."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_local_session(self, session_manager, mock_subprocess):
+        """spawn() creates local Session when sandboxed=False."""
+        config = AgentConfig(agent_id="local-agent", role="test", sandboxed=False)
+        session = await session_manager.spawn(config, "Build something")
+
+        assert session is not None
+        assert isinstance(session, Session)
+        assert not isinstance(session, ContainerizedSession)
+
+    @pytest.mark.asyncio
+    async def test_spawn_containerized_session(
+        self, session_manager, mock_docker_available, mock_subprocess
+    ):
+        """spawn() creates ContainerizedSession when sandboxed=True."""
+        config = AgentConfig(
+            agent_id="sandboxed-agent",
+            role="test",
+            sandboxed=True,
+            worktree=str(session_manager.state_dir / "wt"),
+        )
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            session = await session_manager.spawn(config, "Build something")
+
+        assert session is not None
+        assert isinstance(session, ContainerizedSession)
+
+    @pytest.mark.asyncio
+    async def test_list_local_sessions(
+        self, session_manager, mock_docker_available, mock_subprocess
+    ):
+        """list_local_sessions() returns only local sessions."""
+        local_config = AgentConfig(agent_id="local", role="test", sandboxed=False)
+        container_config = AgentConfig(
+            agent_id="container",
+            role="test",
+            sandboxed=True,
+            worktree=str(session_manager.state_dir / "wt"),
+        )
+
+        await session_manager.spawn(local_config, "Local task")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await session_manager.spawn(container_config, "Container task")
+
+        local_sessions = session_manager.list_local_sessions()
+        assert len(local_sessions) == 1
+        assert local_sessions[0].agent_id == "local"
+
+    @pytest.mark.asyncio
+    async def test_list_containerized_sessions(
+        self, session_manager, mock_docker_available, mock_subprocess
+    ):
+        """list_containerized_sessions() returns only containerized sessions."""
+        local_config = AgentConfig(agent_id="local", role="test", sandboxed=False)
+        container_config = AgentConfig(
+            agent_id="container",
+            role="test",
+            sandboxed=True,
+            worktree=str(session_manager.state_dir / "wt"),
+        )
+
+        await session_manager.spawn(local_config, "Local task")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await session_manager.spawn(container_config, "Container task")
+
+        container_sessions = session_manager.list_containerized_sessions()
+        assert len(container_sessions) == 1
+        assert container_sessions[0].agent_id == "container"
+
+    @pytest.mark.asyncio
+    async def test_is_containerized(
+        self, session_manager, mock_docker_available, mock_subprocess
+    ):
+        """is_containerized() correctly identifies containerized sessions."""
+        local_config = AgentConfig(agent_id="local", role="test", sandboxed=False)
+        container_config = AgentConfig(
+            agent_id="container",
+            role="test",
+            sandboxed=True,
+            worktree=str(session_manager.state_dir / "wt"),
+        )
+
+        await session_manager.spawn(local_config, "Local task")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await session_manager.spawn(container_config, "Container task")
+
+        assert session_manager.is_containerized("local") is False
+        assert session_manager.is_containerized("container") is True
+        assert session_manager.is_containerized("nonexistent") is False
+
+    @pytest.mark.asyncio
+    async def test_stop_all_stops_both_types(
+        self, session_manager, mock_docker_available
+    ):
+        """stop_all() stops both local and containerized sessions."""
+        mock_process = create_mock_process([], hang=True)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+
+            local_config = AgentConfig(agent_id="local", role="test", sandboxed=False)
+            await session_manager.spawn(local_config, "Local task")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = create_mock_process([], hang=True)
+                container_config = AgentConfig(
+                    agent_id="container",
+                    role="test",
+                    sandboxed=True,
+                    worktree=str(session_manager.state_dir / "wt"),
+                )
+                await session_manager.spawn(container_config, "Container task")
+
+        # Both sessions should be running
+        assert len(session_manager.list_running_sessions()) == 2
+
+        # Stop all
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = create_mock_process()
+            stopped = await session_manager.stop_all(timeout=0.1)
+
+        assert stopped == 2
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_returns_both_types(
+        self, session_manager, mock_docker_available, mock_subprocess
+    ):
+        """list_sessions() returns both local and containerized sessions."""
+        local_config = AgentConfig(agent_id="local", role="test", sandboxed=False)
+        container_config = AgentConfig(
+            agent_id="container",
+            role="test",
+            sandboxed=True,
+            worktree=str(session_manager.state_dir / "wt"),
+        )
+
+        await session_manager.spawn(local_config, "Local task")
+
+        with patch("arch.container.check_image_exists", return_value=True):
+            await session_manager.spawn(container_config, "Container task")
+
+        all_sessions = session_manager.list_sessions()
+        assert len(all_sessions) == 2
+
+
 # --- Helper Functions ---
 
 def create_mock_process(output_lines=None, exit_code=0, hang=False):
@@ -577,3 +883,23 @@ def mock_subprocess():
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock:
         mock.return_value = create_mock_process()
         yield mock
+
+
+@pytest.fixture
+def containerized_session(state, token_tracker, tmp_path):
+    """Create a ContainerizedSession for testing."""
+    config = AgentConfig(
+        agent_id="container-agent",
+        role="test",
+        sandboxed=True,
+        worktree=str(tmp_path / "worktree"),
+    )
+    (tmp_path / "worktree").mkdir(exist_ok=True)
+    return ContainerizedSession(config, state, token_tracker, tmp_path, 3999)
+
+
+@pytest.fixture
+def mock_docker_available():
+    """Mock Docker as available."""
+    with patch("arch.container.check_docker_available", return_value=(True, "OK")):
+        yield

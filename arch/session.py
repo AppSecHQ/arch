@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional, Awaitable
 
 from arch.state import StateStore
 from arch.token_tracker import TokenTracker, StreamParser
+from arch.container import ContainerConfig, ContainerSession, ContainerManager
 
 logger = logging.getLogger(__name__)
 
@@ -400,12 +401,298 @@ class Session:
             return False
 
 
+class ContainerizedSession:
+    """
+    Manages a containerized claude CLI session with stream parsing.
+
+    Wraps ContainerSession with token tracking and output parsing,
+    providing the same interface as Session for unified management.
+    """
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        state: StateStore,
+        token_tracker: TokenTracker,
+        state_dir: Path,
+        mcp_port: int = 3999,
+        on_output: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None,
+        on_exit: Optional[Callable[[str, int], Awaitable[None]]] = None,
+    ):
+        """
+        Initialize a containerized session.
+
+        Args:
+            config: Agent configuration (must have sandboxed=True).
+            state: StateStore for persistence.
+            token_tracker: TokenTracker for usage tracking.
+            state_dir: Directory for state files.
+            mcp_port: Port the MCP server is running on.
+            on_output: Callback for parsed output events (agent_id, event).
+            on_exit: Callback when container exits (agent_id, exit_code).
+        """
+        self.config = config
+        self.state = state
+        self.token_tracker = token_tracker
+        self.state_dir = Path(state_dir)
+        self.mcp_port = mcp_port
+        self.on_output = on_output
+        self.on_exit = on_exit
+
+        self._container_session: Optional[ContainerSession] = None
+        self._stream_parser: Optional[StreamParser] = None
+        self._session_id: Optional[str] = None
+        self._running = False
+        self._output_task: Optional[asyncio.Task] = None
+
+    @property
+    def agent_id(self) -> str:
+        """Get the agent ID."""
+        return self.config.agent_id
+
+    @property
+    def is_running(self) -> bool:
+        """Check if the session is running."""
+        return self._running and self._container_session is not None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Get the claude session ID (for resume)."""
+        return self._session_id
+
+    @property
+    def pid(self) -> Optional[int]:
+        """Get the process ID (None for containers)."""
+        return None  # Containers don't expose PID directly
+
+    @property
+    def container_name(self) -> Optional[str]:
+        """Get the Docker container name."""
+        if self._container_session:
+            return self._container_session.container_name
+        return None
+
+    async def spawn(
+        self,
+        prompt: str,
+        resume_session_id: Optional[str] = None
+    ) -> bool:
+        """
+        Spawn the containerized claude CLI session.
+
+        Args:
+            prompt: Initial prompt/assignment for the agent.
+            resume_session_id: Optional session ID to resume.
+
+        Returns:
+            True if spawn succeeded, False otherwise.
+        """
+        if self._running:
+            logger.warning(f"Containerized session {self.agent_id} already running")
+            return False
+
+        # Generate MCP config for container (uses host.docker.internal)
+        mcp_config_path = generate_mcp_config(
+            self.config.agent_id,
+            self.mcp_port,
+            self.state_dir,
+            is_container=True
+        )
+
+        # Log permissions if skip_permissions is set
+        if self.config.skip_permissions:
+            log_permissions_audit(
+                self.state_dir,
+                self.config.agent_id,
+                self.config.role
+            )
+
+        # Create container config from agent config
+        container_config = ContainerConfig(
+            agent_id=self.config.agent_id,
+            image=self.config.container_image,
+            memory_limit=self.config.container_memory_limit,
+            cpus=self.config.container_cpus,
+            network=self.config.container_network,
+            extra_mounts=self.config.container_extra_mounts,
+        )
+
+        # Create container session
+        self._container_session = ContainerSession(
+            agent_id=self.config.agent_id,
+            config=container_config,
+            worktree_path=Path(self.config.worktree) if self.config.worktree else Path.cwd(),
+            mcp_config_path=mcp_config_path,
+            model=self.config.model,
+            skip_permissions=self.config.skip_permissions,
+        )
+
+        logger.info(f"Spawning containerized session {self.agent_id}...")
+
+        # Spawn the container
+        if not await self._container_session.spawn(prompt, resume_session_id):
+            logger.error(f"Failed to spawn container for {self.agent_id}")
+            return False
+
+        self._running = True
+
+        # Register with token tracker
+        self.token_tracker.register_agent(self.config.agent_id, self.config.model)
+
+        # Create stream parser
+        self._stream_parser = StreamParser(self.config.agent_id, self.token_tracker)
+
+        # Start output processing task
+        self._output_task = asyncio.create_task(self._process_output())
+
+        # Update state
+        self.state.update_agent(
+            self.config.agent_id,
+            status="working",
+            container_name=self._container_session.container_name,
+            sandboxed=True
+        )
+
+        logger.info(f"Containerized session {self.agent_id} spawned in container {self._container_session.container_name}")
+        return True
+
+    async def _process_output(self) -> None:
+        """Process stdout from the container line by line."""
+        if not self._container_session:
+            return
+
+        try:
+            while self._running:
+                line = await self._container_session.read_stdout()
+                if not line:
+                    break
+
+                line_str = line.decode("utf-8", errors="replace").strip()
+                if not line_str:
+                    continue
+
+                # Parse the line
+                event = self._stream_parser.parse_line(line_str)
+
+                if event:
+                    # Check for session_id in result event
+                    if event.get("type") == "result":
+                        self._session_id = event.get("session_id")
+                        if self._session_id:
+                            self.state.update_agent(
+                                self.config.agent_id,
+                                session_id=self._session_id
+                            )
+
+                    # Notify callback
+                    if self.on_output:
+                        try:
+                            await self.on_output(self.config.agent_id, event)
+                        except Exception as e:
+                            logger.error(f"Output callback error: {e}")
+
+        except asyncio.CancelledError:
+            logger.debug(f"Output processing cancelled for {self.agent_id}")
+        except Exception as e:
+            logger.error(f"Error processing output for {self.agent_id}: {e}")
+
+        # Wait for container to finish
+        if self._container_session:
+            exit_code = await self._container_session.wait()
+            await self._handle_exit(exit_code)
+
+    async def _handle_exit(self, exit_code: int) -> None:
+        """Handle container exit."""
+        self._running = False
+        logger.info(f"Containerized session {self.agent_id} exited with code {exit_code}")
+
+        # Persist session_id if we got one
+        if self._session_id:
+            self.state.update_agent(
+                self.config.agent_id,
+                session_id=self._session_id
+            )
+
+        if exit_code != 0:
+            # Unexpected exit - set error status and notify Archie
+            self.state.update_agent(self.config.agent_id, status="error")
+            self.state.add_message(
+                "harness",
+                "archie",
+                f"Agent {self.config.agent_id} (containerized) exited unexpectedly with code {exit_code}. "
+                f"Check state/agents.json for details."
+            )
+            logger.error(f"Containerized session {self.agent_id} exited with non-zero code: {exit_code}")
+        else:
+            # Normal exit
+            self.state.update_agent(self.config.agent_id, status="done")
+
+        # Notify callback
+        if self.on_exit:
+            try:
+                await self.on_exit(self.config.agent_id, exit_code)
+            except Exception as e:
+                logger.error(f"Exit callback error: {e}")
+
+    async def stop(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
+        """
+        Stop the container gracefully.
+
+        Args:
+            timeout: Seconds to wait before force killing.
+
+        Returns:
+            True if stopped successfully.
+        """
+        if not self._container_session or not self._running:
+            return True
+
+        logger.info(f"Stopping containerized session {self.agent_id}...")
+
+        try:
+            result = await self._container_session.stop(timeout)
+            self._running = False
+
+            # Cancel output task
+            if self._output_task and not self._output_task.done():
+                self._output_task.cancel()
+                try:
+                    await self._output_task
+                except asyncio.CancelledError:
+                    pass
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error stopping containerized session {self.agent_id}: {e}")
+            return False
+
+    async def kill(self) -> bool:
+        """
+        Force kill the container.
+
+        Returns:
+            True if killed successfully.
+        """
+        if not self._container_session:
+            return True
+
+        result = await self._container_session.kill()
+        self._running = False
+        return result
+
+
+# Type alias for either session type
+AnySession = Session | ContainerizedSession
+
+
 class SessionManager:
     """
-    Manages multiple agent sessions.
+    Manages multiple agent sessions (local and containerized).
 
     Provides a higher-level interface for spawning, tracking, and
-    tearing down agent sessions.
+    tearing down agent sessions. Automatically delegates to Docker
+    when AgentConfig.sandboxed=True.
     """
 
     def __init__(
@@ -435,16 +722,18 @@ class SessionManager:
         self.on_output = on_output
         self.on_exit = on_exit
 
-        self._sessions: dict[str, Session] = {}
+        self._sessions: dict[str, AnySession] = {}
 
     async def spawn(
         self,
         config: AgentConfig,
         prompt: str,
         resume_session_id: Optional[str] = None
-    ) -> Optional[Session]:
+    ) -> Optional[AnySession]:
         """
         Spawn a new agent session.
+
+        Automatically uses Docker containers when config.sandboxed=True.
 
         Args:
             config: Agent configuration.
@@ -452,7 +741,7 @@ class SessionManager:
             resume_session_id: Optional session ID to resume.
 
         Returns:
-            Session if spawn succeeded, None otherwise.
+            Session or ContainerizedSession if spawn succeeded, None otherwise.
         """
         if config.agent_id in self._sessions:
             existing = self._sessions[config.agent_id]
@@ -460,15 +749,29 @@ class SessionManager:
                 logger.warning(f"Session {config.agent_id} already running")
                 return existing
 
-        session = Session(
-            config=config,
-            state=self.state,
-            token_tracker=self.token_tracker,
-            state_dir=self.state_dir,
-            mcp_port=self.mcp_port,
-            on_output=self.on_output,
-            on_exit=self._wrap_exit_callback(config.agent_id),
-        )
+        # Choose session type based on sandboxed flag
+        if config.sandboxed:
+            logger.info(f"Spawning containerized session for {config.agent_id}")
+            session: AnySession = ContainerizedSession(
+                config=config,
+                state=self.state,
+                token_tracker=self.token_tracker,
+                state_dir=self.state_dir,
+                mcp_port=self.mcp_port,
+                on_output=self.on_output,
+                on_exit=self._wrap_exit_callback(config.agent_id),
+            )
+        else:
+            logger.info(f"Spawning local session for {config.agent_id}")
+            session = Session(
+                config=config,
+                state=self.state,
+                token_tracker=self.token_tracker,
+                state_dir=self.state_dir,
+                mcp_port=self.mcp_port,
+                on_output=self.on_output,
+                on_exit=self._wrap_exit_callback(config.agent_id),
+            )
 
         if await session.spawn(prompt, resume_session_id):
             self._sessions[config.agent_id] = session
@@ -485,17 +788,30 @@ class SessionManager:
 
         return wrapper
 
-    def get_session(self, agent_id: str) -> Optional[Session]:
+    def get_session(self, agent_id: str) -> Optional[AnySession]:
         """Get a session by agent ID."""
         return self._sessions.get(agent_id)
 
-    def list_sessions(self) -> list[Session]:
-        """List all sessions."""
+    def list_sessions(self) -> list[AnySession]:
+        """List all sessions (local and containerized)."""
         return list(self._sessions.values())
 
-    def list_running_sessions(self) -> list[Session]:
-        """List all running sessions."""
+    def list_running_sessions(self) -> list[AnySession]:
+        """List all running sessions (local and containerized)."""
         return [s for s in self._sessions.values() if s.is_running]
+
+    def list_local_sessions(self) -> list[Session]:
+        """List only local (non-containerized) sessions."""
+        return [s for s in self._sessions.values() if isinstance(s, Session)]
+
+    def list_containerized_sessions(self) -> list[ContainerizedSession]:
+        """List only containerized sessions."""
+        return [s for s in self._sessions.values() if isinstance(s, ContainerizedSession)]
+
+    def is_containerized(self, agent_id: str) -> bool:
+        """Check if an agent is running in a container."""
+        session = self._sessions.get(agent_id)
+        return isinstance(session, ContainerizedSession)
 
     async def stop(self, agent_id: str, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """
