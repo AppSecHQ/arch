@@ -57,6 +57,10 @@ venv/
 env/
 .pytest_cache/
 
+# ARCH runtime state
+state/
+.worktrees/
+
 # Package manager locks (optional - uncomment if preferred)
 # package-lock.json
 # yarn.lock
