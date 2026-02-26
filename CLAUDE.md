@@ -1,6 +1,6 @@
 # Project Guidelines
 
-Read SPEC-AGENT-HARNESS.md in full. You are going to build ARCH (Agent Runtime & Coordination Harness) exactly as specified.
+Read SPEC-AGENT-HARNESS.md in full. You are building ARCH (Agent Runtime & Coordination Harness) exactly as specified.
 
 Before writing any code:
 1. Read the entire spec top to bottom
@@ -20,3 +20,7 @@ When you complete a step, tell me what you built, show me the tests passing, and
 
 ## User Preferences
 - **No self-attribution**: Do NOT add "Co-Authored-By: Claude" or similar attribution lines to commits, PRs, documents, or any other content unless explicitly instructed by the user.
+
+## Compacting and Resuming
+- When compacting, update your memory and update HANDOFF.md. 
+- When resuming, read HANDOFF.md for full context. Next step is Step 7: Session Manager (container integration).

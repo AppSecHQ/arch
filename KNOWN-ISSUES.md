@@ -42,13 +42,17 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Session Manager (Step 5)
 
-_To be filled after Step 5 review._
+- [ ] **Unread stderr can deadlock** — `stderr=asyncio.subprocess.PIPE` is set but stderr is never consumed. If the subprocess writes enough to stderr, the pipe buffer fills and the process deadlocks. Either read stderr concurrently or use `asyncio.subprocess.DEVNULL`.
+- [ ] **Exit handling race** — `_process_output()` calls `_handle_exit()` after the read loop ends, but `stop()` can also cancel the output task and set `_running = False`. If both race, `_handle_exit` could fire twice. Add a guard at the top of `_handle_exit`.
+- [ ] **Dead sessions accumulate** — `_wrap_exit_callback` in SessionManager doesn't remove finished sessions from `_sessions` dict. Stale entries grow over long runs. Add cleanup or periodic pruning.
 
 ---
 
 ## Container Manager (Step 6)
 
-_To be filled after Step 6 review._
+- [ ] **Unread stderr can deadlock (same as Step 5)** — `stderr=PIPE` is set but only exposed via optional `read_stderr()`. If the container writes heavily to stderr without anyone reading, pipe buffer fills and process deadlocks.
+- [ ] **Timeout test uses wrong exception** — `test_check_docker_available_timeout` mocks `TimeoutError` but the code catches `subprocess.TimeoutExpired`. Test passes via the generic `except Exception` fallback, not the intended path.
+- [ ] **No output parsing** — `ContainerSession` lacks the `_process_output` → `StreamParser` → `TokenTracker` pipeline that `Session` has. By design for Step 7 to integrate, but containerized agents won't track tokens until then.
 
 ---
 
