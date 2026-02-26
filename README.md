@@ -25,7 +25,7 @@ Archie (the Lead Agent) reads your project, decomposes the work, and dynamically
 - **Sandboxed agents** — run agents in Docker containers for safety and isolation
 - **Permission control** — opt-in `--dangerously-skip-permissions` per agent role, with audit logging
 - **Live TUI dashboard** — see agent status, activity, and costs at a glance
-- **Configurable** — single `archie.yaml` defines your project, agent pool, and settings
+- **Configurable** — single `arch.yaml` defines your project, agent pool, and settings
 
 ---
 
@@ -47,7 +47,7 @@ arch up
 ## Configuration
 
 ```yaml
-# archie.yaml
+# arch.yaml
 project:
   name: My App
   description: A full-stack web application

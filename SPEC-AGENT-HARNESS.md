@@ -20,7 +20,7 @@ $ arch up
 Agent Runtime & Coordination Harness v1.0
 Hi, I'm Archie. Let's build something great.
 
-✓ Reading archie.yaml...
+✓ Reading arch.yaml...
 ✓ Initializing git worktrees...
 ✓ Starting MCP server on :3999...
 ✓ Archie is online.
@@ -37,7 +37,7 @@ Hi, I'm Archie. Let's build something great.
 ```
 arch/
 ├── arch.py                     # Main entrypoint (CLI: arch up / down / status / init)
-├── archie.yaml                 # User-facing project config (see schema below)
+├── arch.yaml                 # User-facing project config (see schema below)
 ├── BRIEF.md                    # Persistent project brief — goals, constraints, status, decisions
 ├── requirements.txt
 │
@@ -73,7 +73,7 @@ arch/
 
 ## BRIEF.md — Project Brief
 
-`BRIEF.md` lives in the project root alongside `archie.yaml`. It is the persistent source of truth for project goals, constraints, and current state across sessions. Archie reads it at startup and updates it at shutdown.
+`BRIEF.md` lives in the project root alongside `arch.yaml`. It is the persistent source of truth for project goals, constraints, and current state across sessions. Archie reads it at startup and updates it at shutdown.
 
 **The file is human-editable** — the user can update it at any time between sessions to redirect Archie.
 
@@ -110,7 +110,7 @@ _Appended by Archie when significant decisions are made._
 
 **At shutdown:** `close_project` requires Archie to rewrite the **Current Status** section before the process exits, summarizing what was accomplished and what remains.
 
-**`arch init`** scaffolds a blank `BRIEF.md` alongside `archie.yaml`.
+**`arch init`** scaffolds a blank `BRIEF.md` alongside `arch.yaml`.
 
 ### New MCP tool — available to Archie only
 
@@ -126,7 +126,7 @@ update_brief
 
 ---
 
-## archie.yaml Schema
+## arch.yaml Schema
 
 ```yaml
 project:
@@ -190,7 +190,7 @@ settings:
 Responsible for the full lifecycle of the ARCH system.
 
 **Startup sequence:**
-1. Parse and validate `archie.yaml`
+1. Parse and validate `arch.yaml`
 2. Initialize state store (load existing `state/` or create fresh)
 3. Verify git repo is accessible and clean enough to worktree
 4. **Permission gate:** If any agent in `agent_pool` has `permissions.skip_permissions: true`, print a prominent warning listing the affected agents and require explicit user confirmation (`y`) before continuing. Log this acknowledgment with timestamp to `state/`.
@@ -283,7 +283,7 @@ spawn_agent
     context: string?          # optional additional context injected into agent's CLAUDE.md
     skip_permissions: bool?   # request --dangerously-skip-permissions for this agent.
                               # ONLY valid if the role has permissions.skip_permissions: true
-                              # in archie.yaml. If role does not have it configured, this
+                              # in arch.yaml. If role does not have it configured, this
                               # param is ignored and skip_permissions is always false.
                               # The harness will surface an escalate_to_user confirmation
                               # if Archie requests this and it was not pre-approved at startup.
@@ -337,7 +337,7 @@ close_project
 
 #### MCP Tools — GitHub Integration (Archie only)
 
-These tools wrap the `gh` CLI. Require `gh` to be installed and authenticated (`gh auth status`). All tools are no-ops if `github.repo` is not set in `archie.yaml`. Archie uses these as a **Scrum Master** — creating issues for each task, tracking sprint progress, and closing issues via PRs.
+These tools wrap the `gh` CLI. Require `gh` to be installed and authenticated (`gh auth status`). All tools are no-ops if `github.repo` is not set in `arch.yaml`. Archie uses these as a **Scrum Master** — creating issues for each task, tracking sprint progress, and closing issues via PRs.
 
 ```
 gh_create_issue
@@ -777,7 +777,7 @@ Each persona is a markdown file written in CLAUDE.md style for that role. The ha
 
 ```
 Usage:
-  arch up [--config archie.yaml] [--keep-worktrees]
+  arch up [--config arch.yaml] [--keep-worktrees]
         Start ARCH and launch Archie
 
   arch down
@@ -790,7 +790,7 @@ Usage:
         Resume from saved state/ directory
 
   arch init [--name "My Project"] [--github owner/repo]
-        Scaffold archie.yaml + personas/ + BRIEF.md in current directory.
+        Scaffold arch.yaml + personas/ + BRIEF.md in current directory.
         If --github is provided: creates labels and default milestones in the repo.
 ```
 
@@ -819,7 +819,7 @@ Build and verify each layer before building on it:
 ## Key Constraints and Edge Cases
 
 - **Never** store or log API keys or credentials anywhere in `state/` or logs. The `ANTHROPIC_API_KEY` is passed to containers via env var at runtime only and never written to disk.
-- **`--dangerously-skip-permissions` must never be used silently.** It must be declared in `archie.yaml` AND confirmed by the user at startup. Any runtime request from Archie to use it on an undeclared role must trigger an `escalate_to_user` before spawning. Log all uses to `state/permissions_audit.log`.
+- **`--dangerously-skip-permissions` must never be used silently.** It must be declared in `arch.yaml` AND confirmed by the user at startup. Any runtime request from Archie to use it on an undeclared role must trigger an `escalate_to_user` before spawning. Log all uses to `state/permissions_audit.log`.
 - **Archie itself never runs with `--dangerously-skip-permissions`** and never runs in a container. Archie runs on the host with standard permissions always.
 - **Container teardown:** Use `--rm` on `docker run` so containers self-remove. Also register `docker stop arch-{agent_id}` in the `atexit` handler for each containerized agent in case `--rm` doesn't fire cleanly.
 - **Container networking:** On Linux, `host.docker.internal` is not available by default — use `--add-host host.docker.internal:host-gateway` in the docker run command.

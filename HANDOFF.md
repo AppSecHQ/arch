@@ -40,7 +40,7 @@ Step 7 (Session/Container integration) is complete but not yet committed.
 
 ### Step 8: Orchestrator (`arch/orchestrator.py`)
 Wire all components, startup/shutdown, signal handlers:
-- Parse and validate `archie.yaml`
+- Parse and validate `arch.yaml`
 - Initialize state store
 - Permission gate: confirm `skip_permissions` usage
 - Container gate: verify Docker if any agent has `sandbox.enabled`
@@ -62,7 +62,7 @@ Wire all components, startup/shutdown, signal handlers:
 ```
 arch/
 ├── arch.py                 # CLI entrypoint (Step 12)
-├── archie.yaml             # User config (exists in spec)
+├── arch.yaml             # User config (exists in spec)
 ├── BRIEF.md                # Project brief (scaffolded by init)
 ├── pricing.yaml            # Token pricing config
 ├── requirements.txt        # Dependencies
