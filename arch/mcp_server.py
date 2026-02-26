@@ -388,8 +388,11 @@ class MCPServer:
         # Pending escalations: decision_id -> asyncio.Event
         self._pending_escalations: dict[str, asyncio.Event] = {}
 
-        # Track connected agents for each SSE session
-        self._agent_sessions: dict[str, str] = {}
+        # Persistent MCP server instances per agent
+        self._mcp_servers: dict[str, Server] = {}
+
+        # Active SSE transports per agent (for routing POST messages)
+        self._active_transports: dict[str, SseServerTransport] = {}
 
         # Build tool lists
         self._worker_tool_names = {t.name for t in WORKER_TOOLS}
@@ -1006,46 +1009,67 @@ class MCPServer:
 
     # --- Server Setup ---
 
+    def get_or_create_mcp_server(self, agent_id: str) -> Server:
+        """
+        Get or create an MCP Server instance for a specific agent.
+
+        Server instances are cached to ensure consistent state across
+        SSE and POST handlers.
+        """
+        if agent_id not in self._mcp_servers:
+            server = Server(f"arch-{agent_id}")
+
+            @server.list_tools()
+            async def list_tools() -> list[Tool]:
+                return self._get_tools_for_agent(agent_id)
+
+            @server.call_tool()
+            async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+                result = await self._handle_tool_call(agent_id, name, arguments)
+                return [TextContent(type="text", text=json.dumps(result))]
+
+            self._mcp_servers[agent_id] = server
+
+        return self._mcp_servers[agent_id]
+
     def create_mcp_server(self, agent_id: str) -> Server:
-        """Create an MCP Server instance for a specific agent."""
-        server = Server(f"arch-{agent_id}")
-
-        @server.list_tools()
-        async def list_tools() -> list[Tool]:
-            return self._get_tools_for_agent(agent_id)
-
-        @server.call_tool()
-        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-            result = await self._handle_tool_call(agent_id, name, arguments)
-            return [TextContent(type="text", text=json.dumps(result))]
-
-        return server
+        """Create an MCP Server instance for a specific agent (for testing)."""
+        return self.get_or_create_mcp_server(agent_id)
 
     def create_app(self) -> Starlette:
         """Create the Starlette ASGI application with SSE endpoints."""
+        # Reference to self for use in closures
+        mcp_server = self
 
         async def handle_sse(request):
             """Handle SSE connection for an agent."""
             agent_id = request.path_params.get("agent_id", "unknown")
             logger.info(f"SSE connection from agent: {agent_id}")
 
-            # Create MCP server for this agent
-            mcp_server = self.create_mcp_server(agent_id)
+            # Get or create persistent MCP server for this agent
+            server = mcp_server.get_or_create_mcp_server(agent_id)
 
-            # Create SSE transport
-            transport = SseServerTransport("/messages/")
+            # Create SSE transport with path that includes agent_id
+            transport = SseServerTransport(f"/messages/{agent_id}")
 
-            # Handle the SSE connection
-            async with transport.connect_sse(
-                request.scope,
-                request.receive,
-                request._send
-            ) as (read_stream, write_stream):
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options()
-                )
+            # Store transport for POST handler to use
+            mcp_server._active_transports[agent_id] = transport
+
+            try:
+                # Handle the SSE connection
+                async with transport.connect_sse(
+                    request.scope,
+                    request.receive,
+                    request._send
+                ) as (read_stream, write_stream):
+                    await server.run(
+                        read_stream,
+                        write_stream,
+                        server.create_initialization_options()
+                    )
+            finally:
+                # Clean up transport when connection closes
+                mcp_server._active_transports.pop(agent_id, None)
 
             return Response()
 
@@ -1053,15 +1077,19 @@ class MCPServer:
             """Handle POST messages for SSE transport."""
             agent_id = request.path_params.get("agent_id", "unknown")
 
-            # Get the MCP server for this agent
-            mcp_server = self.create_mcp_server(agent_id)
-            transport = SseServerTransport("/messages/")
+            # Get the active transport for this agent
+            transport = mcp_server._active_transports.get(agent_id)
 
-            body = await request.body()
+            if transport is None:
+                logger.warning(f"POST message for disconnected agent: {agent_id}")
+                return Response(status_code=404, content="Agent not connected")
 
-            # Process the message
-            # Note: This is simplified - actual implementation depends on MCP SDK internals
-            return Response(status_code=202)
+            # Route the message through the transport's POST handler
+            return await transport.handle_post_message(
+                request.scope,
+                request.receive,
+                request._send
+            )
 
         routes = [
             Route("/sse/{agent_id}", handle_sse),

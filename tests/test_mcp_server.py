@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from starlette.applications import Starlette
+
 from arch.mcp_server import (
     MCPServer,
     WORKER_TOOLS,
@@ -504,6 +506,35 @@ class TestMCPServerCreate:
         server = mcp_server.create_mcp_server("frontend-1")
         assert server is not None
         assert server.name == "arch-frontend-1"
+
+    def test_get_or_create_returns_same_instance(self, mcp_server):
+        """get_or_create_mcp_server returns the same instance for same agent."""
+        server1 = mcp_server.get_or_create_mcp_server("test-agent")
+        server2 = mcp_server.get_or_create_mcp_server("test-agent")
+
+        assert server1 is server2
+
+    def test_get_or_create_different_instances_per_agent(self, mcp_server):
+        """get_or_create_mcp_server returns different instances for different agents."""
+        server1 = mcp_server.get_or_create_mcp_server("agent-1")
+        server2 = mcp_server.get_or_create_mcp_server("agent-2")
+
+        assert server1 is not server2
+        assert server1.name == "arch-agent-1"
+        assert server2.name == "arch-agent-2"
+
+    def test_servers_cached_in_dict(self, mcp_server):
+        """MCP servers are cached in _mcp_servers dict."""
+        assert len(mcp_server._mcp_servers) == 0
+
+        mcp_server.get_or_create_mcp_server("cached-agent")
+
+        assert "cached-agent" in mcp_server._mcp_servers
+
+    def test_create_app_returns_starlette(self, mcp_server):
+        """create_app returns a Starlette application."""
+        app = mcp_server.create_app()
+        assert isinstance(app, Starlette)
 
 
 # --- Fixtures ---

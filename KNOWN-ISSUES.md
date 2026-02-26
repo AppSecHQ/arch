@@ -7,7 +7,7 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## State Store (Step 1)
 
-- [ ] **No enum validation** — agent status and task status values are not validated before persisting. Invalid strings can slip in silently. Fix before MCP server step (Step 4) when status values become load-bearing.
+- [x] **No enum validation** — FIXED in Step 4. Added `validate_agent_status()` and `validate_task_status()` with `InvalidStatusError`.
 - [ ] **No cascade deletion** — `remove_agent()` leaves orphaned tasks and messages referencing the removed agent. Document behavior or implement cleanup.
 - [ ] **No JSON corruption recovery** — corrupted state files return None silently on load. Add try/except with logged warning.
 
@@ -26,13 +26,17 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Token Tracker (Step 3)
 
-_To be filled after Step 3 review._
+- [ ] **Callback exception propagation** — if `on_usage_update` callback raises, it propagates through the token tracker and could crash stream parsing. Wrap in try/except. Fix in Step 9 (Dashboard) when wiring up callbacks.
 
 ---
 
 ## MCP Server (Step 4)
 
-_To be filled after Step 4 review._
+- [x] **POST /messages stubbed out** — FIXED. POST handler now routes messages through active transport.
+- [x] **MCP server instance duplication** — FIXED. Added `get_or_create_mcp_server()` with instance caching in `_mcp_servers` dict.
+- [ ] **BRIEF.md regex fails on whitespace** — regex for updating Current Status section assumes exact formatting. Whitespace variations cause silent failures.
+- [ ] **GitHub CLI FileNotFoundError opaque** — when `gh` not installed, error message is generic `str(e)`. Add explicit handling with install instructions.
+- [ ] **Logging inconsistent** — `logger` imported but only used in a few places. Add logging for all error paths.
 
 ---
 
