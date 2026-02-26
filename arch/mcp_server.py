@@ -394,6 +394,10 @@ class MCPServer:
         # Active SSE transports per agent (for routing POST messages)
         self._active_transports: dict[str, SseServerTransport] = {}
 
+        # Server state
+        self._server: Optional[uvicorn.Server] = None
+        self._server_task: Optional[asyncio.Task] = None
+
         # Build tool lists
         self._worker_tool_names = {t.name for t in WORKER_TOOLS}
         self._archie_tool_names = self._worker_tool_names | {t.name for t in ARCHIE_ONLY_TOOLS}
@@ -1098,13 +1102,46 @@ class MCPServer:
 
         return Starlette(routes=routes)
 
-    async def start(self):
-        """Start the MCP server."""
+    async def start(self, background: bool = True):
+        """
+        Start the MCP server.
+
+        Args:
+            background: If True, run server in a background task (non-blocking).
+                       If False, run blocking until server stops.
+        """
         app = self.create_app()
         config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
-        server = uvicorn.Server(config)
-        await server.serve()
+        self._server = uvicorn.Server(config)
+
+        if background:
+            self._server_task = asyncio.create_task(self._server.serve())
+            # Give server time to start
+            await asyncio.sleep(0.1)
+            logger.info(f"MCP server started on port {self.port}")
+        else:
+            await self._server.serve()
+
+    async def stop(self):
+        """Stop the MCP server."""
+        if self._server:
+            self._server.should_exit = True
+
+            if self._server_task:
+                try:
+                    await asyncio.wait_for(self._server_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("MCP server shutdown timed out")
+                    self._server_task.cancel()
+                    try:
+                        await self._server_task
+                    except asyncio.CancelledError:
+                        pass
+
+            self._server = None
+            self._server_task = None
+            logger.info("MCP server stopped")
 
     def run(self):
         """Run the MCP server (blocking)."""
-        asyncio.run(self.start())
+        asyncio.run(self.start(background=False))

@@ -2,11 +2,11 @@
 
 ## Current State
 
-**Steps Completed: 1-7 of 13**
-**Tests: 240 passing**
-**Last Commit:** `7862953` (Step 6 - Container Manager)
+**Steps Completed: 1-8 of 13**
+**Tests: 273 passing**
+**Last Commit:** `587fa7d` (Rename archie.yaml to arch.yaml in docs)
 
-Step 7 (Session/Container integration) is complete but not yet committed.
+Step 8 (Orchestrator) is complete but not yet committed.
 
 ## Completed Components
 
@@ -19,39 +19,50 @@ Step 7 (Session/Container integration) is complete but not yet committed.
 | 5 | `arch/session.py` | Local claude subprocess, output parsing, resume | 34 |
 | 6 | `arch/container.py` | Docker spawn/stop, volume mounts, Dockerfile | 40 |
 | 7 | `arch/session.py` | Unified Session/Container interface, stream parsing for containers | 16 |
+| 8 | `arch/orchestrator.py` | Config parsing, startup/shutdown, gates, signal handlers | 33 |
 
-## Step 7 Implementation Details
+## Step 8 Implementation Details
 
 ### What was built:
-- `ContainerizedSession` class in `session.py` - wraps `ContainerSession` with stream parsing + token tracking
-- `SessionManager.spawn()` now checks `AgentConfig.sandboxed`:
-  - `sandboxed=False` → creates local `Session`
-  - `sandboxed=True` → creates `ContainerizedSession`
-- `AnySession` type alias for `Session | ContainerizedSession`
-- New methods: `list_local_sessions()`, `list_containerized_sessions()`, `is_containerized()`
+- **Config dataclasses**: `ProjectConfig`, `ArchieConfig`, `AgentPoolEntry`, `SandboxConfig`, `PermissionsConfig`, `GitHubConfig`, `SettingsConfig`, `ArchConfig`
+- **`parse_config()`**: Parses arch.yaml into typed config objects with validation
+- **Gate checks**:
+  - `check_permission_gate()` - identifies agents with skip_permissions
+  - `check_container_gate()` - verifies Docker and images
+  - `check_github_gate()` - verifies gh CLI and repo access
+- **`Orchestrator` class**:
+  - `startup()` - 10-step startup sequence
+  - `shutdown()` - graceful cleanup
+  - `run()` - main loop
+  - Signal handlers (SIGINT, SIGTERM, atexit)
+  - Archie auto-restart with --resume
 
-### Key patterns:
-- Both `Session` and `ContainerizedSession` share same interface: `spawn()`, `stop()`, `is_running`, `session_id`, `agent_id`
-- Stream parsing via `StreamParser` works identically for both session types
-- Token tracking unified through `TokenTracker.register_agent()`
-- State updates include `container_name` and `sandboxed` flags for containerized agents
+### Also updated:
+- `arch/mcp_server.py` - Added `stop()` method for graceful shutdown, `start(background=True)` for non-blocking
+
+### Startup sequence:
+1. Parse and validate arch.yaml
+2. Initialize state store
+3. Verify git repo
+4. Permission gate (user confirmation for skip_permissions)
+5. Container gate (Docker check, image pull)
+6. GitHub gate (warn only)
+7. Start MCP server (background)
+8. Create Archie's worktree
+9. Spawn Archie session
+10. (Dashboard - Step 9)
 
 ## Next Steps
 
-### Step 8: Orchestrator (`arch/orchestrator.py`)
-Wire all components, startup/shutdown, signal handlers:
-- Parse and validate `arch.yaml`
-- Initialize state store
-- Permission gate: confirm `skip_permissions` usage
-- Container gate: verify Docker if any agent has `sandbox.enabled`
-- GitHub gate: verify `gh` auth if `github.repo` is set
-- Start MCP server
-- Create Archie's worktree and spawn Archie session
-- Start dashboard
-- Signal handlers for graceful shutdown (`SIGINT`, `SIGTERM`, `atexit`)
+### Step 9: Dashboard (`arch/dashboard.py`)
+Textual TUI with:
+- Agents panel with status indicators (`●`, `[c]`, `[!]`)
+- Activity log
+- Cost panel with budget progress bar
+- User input for escalations (blocking Archie's `escalate_to_user`)
+- Keyboard shortcuts (q, ?, l, 1-9, m)
 
-### Steps 9-13 (Remaining)
-9. **Dashboard** - Textual TUI, live state, user input for escalations
+### Steps 10-13 (Remaining)
 10. **Persona files** - archie.md, frontend.md, backend.md, qa.md, security.md, copywriter.md
 11. **GitHub tools** - Already implemented in MCP server, just need integration tests
 12. **CLI entrypoint** - `arch up/down/status/init` commands
@@ -62,7 +73,7 @@ Wire all components, startup/shutdown, signal handlers:
 ```
 arch/
 ├── arch.py                 # CLI entrypoint (Step 12)
-├── arch.yaml             # User config (exists in spec)
+├── arch.yaml               # User config
 ├── BRIEF.md                # Project brief (scaffolded by init)
 ├── pricing.yaml            # Token pricing config
 ├── requirements.txt        # Dependencies
@@ -73,10 +84,10 @@ arch/
 │   ├── state.py            # ✅ Step 1
 │   ├── worktree.py         # ✅ Step 2
 │   ├── token_tracker.py    # ✅ Step 3
-│   ├── mcp_server.py       # ✅ Step 4
+│   ├── mcp_server.py       # ✅ Step 4 (+ stop() added in Step 8)
 │   ├── session.py          # ✅ Steps 5 + 7
 │   ├── container.py        # ✅ Step 6
-│   ├── orchestrator.py     # Step 8
+│   ├── orchestrator.py     # ✅ Step 8
 │   └── dashboard.py        # Step 9
 │
 ├── personas/               # Step 10
@@ -85,31 +96,33 @@ arch/
 
 ## Architecture Notes
 
-### MCP Server
-- SSE transport on `localhost:{mcp_port}`
-- Agent identity from URL path: `/sse/{agent_id}`
-- Server instances cached in `_mcp_servers` dict
-- Active transports tracked in `_active_transports` dict
-- `escalate_to_user` blocks via `asyncio.Event`
+### Orchestrator Lifecycle
+```
+Orchestrator
+  ├── startup()
+  │   ├── parse_config() → ArchConfig
+  │   ├── StateStore(state_dir)
+  │   ├── _permission_gate() → user confirmation
+  │   ├── _container_gate() → Docker check
+  │   ├── _github_gate() → gh auth check
+  │   ├── MCPServer.start(background=True)
+  │   ├── WorktreeManager.create("archie")
+  │   └── SessionManager.spawn(archie_config)
+  ├── run() → main loop, monitors Archie
+  └── shutdown()
+      ├── SessionManager.stop_all()
+      ├── MCPServer.stop()
+      └── WorktreeManager.cleanup_all()
+```
 
-### Session Management
-- `Session` class handles local subprocess
-- `ContainerizedSession` class wraps `ContainerSession` + adds parsing
-- Both parse stream-json output via `StreamParser`
-- Session ID extracted from `result` event for resume
-- `SessionManager.spawn()` auto-delegates based on `sandboxed` flag
+### Signal Handling
+- SIGINT/SIGTERM: Set `_shutdown_requested = True`, graceful exit
+- atexit: Emergency worktree cleanup
 
-### State Store
-- In-memory dict with automatic JSON flush
-- Enum validation for status fields
-- Cursor-based message pagination
-
-## Known Issues (Pre-Step 8)
-
-From `KNOWN-ISSUES.md`:
-- [ ] Add subprocess timeouts to `worktree.py` (all calls)
-- [ ] Fix PR JSON parsing (use `gh pr create --json`)
-- [ ] Add PR creation tests
+### Archie Auto-Restart
+- On unexpected exit (non-zero), attempt `--resume` once
+- Uses session_id from previous run
+- After 2 failures, initiate shutdown
 
 ## Running Tests
 
@@ -120,10 +133,10 @@ python -m pytest tests/ -v
 
 ## Commit Pending
 
-Step 7 files need to be committed:
+Step 8 files need to be committed:
 ```bash
-git add arch/session.py tests/test_session.py HANDOFF.md
-git commit -m "Add session/container integration (Step 7)"
+git add arch/orchestrator.py arch/mcp_server.py tests/test_orchestrator.py HANDOFF.md
+git commit -m "Add orchestrator implementation (Step 8)"
 git push origin main
 ```
 
@@ -132,12 +145,8 @@ git push origin main
 ```bash
 source .venv/bin/activate
 python -c "
-from arch.state import StateStore
-from arch.worktree import WorktreeManager
-from arch.token_tracker import TokenTracker
+from arch.orchestrator import Orchestrator, parse_config
 from arch.mcp_server import MCPServer
-from arch.session import Session, ContainerizedSession, SessionManager, AnySession
-from arch.container import ContainerManager
-print('All modules import successfully')
+print('Orchestrator ready')
 "
 ```
