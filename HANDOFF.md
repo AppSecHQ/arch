@@ -3,10 +3,10 @@
 ## Current State
 
 **Steps Completed: 1-8 of 13**
-**Tests: 273 passing**
-**Last Commit:** `587fa7d` (Rename archie.yaml to arch.yaml in docs)
+**Tests: 283 passing**
+**Last Commit:** `ee74c2c` (HANDOFF.md and KNOWN-ISSUES.md updates)
 
-Step 8 (Orchestrator) is complete but not yet committed.
+Step 8 follow-up (agent lifecycle wiring) is complete but not yet committed.
 
 ## Completed Components
 
@@ -19,89 +19,43 @@ Step 8 (Orchestrator) is complete but not yet committed.
 | 5 | `arch/session.py` | Local claude subprocess, output parsing, resume | 34 |
 | 6 | `arch/container.py` | Docker spawn/stop, volume mounts, Dockerfile | 40 |
 | 7 | `arch/session.py` | Unified Session/Container interface, stream parsing for containers | 16 |
-| 8 | `arch/orchestrator.py` | Config parsing, startup/shutdown, gates, signal handlers | 33 |
+| 8 | `arch/orchestrator.py` | Config parsing, startup/shutdown, gates, signal handlers, lifecycle wiring | 43 |
 
-## Step 8 Implementation Details
+## Step 8 Follow-up Implementation
 
-### What was built:
-- **Config dataclasses**: `ProjectConfig`, `ArchieConfig`, `AgentPoolEntry`, `SandboxConfig`, `PermissionsConfig`, `GitHubConfig`, `SettingsConfig`, `ArchConfig`
-- **`parse_config()`**: Parses arch.yaml into typed config objects with validation
-- **Gate checks**:
-  - `check_permission_gate()` - identifies agents with skip_permissions
-  - `check_container_gate()` - verifies Docker and images
-  - `check_github_gate()` - verifies gh CLI and repo access
-- **`Orchestrator` class**:
-  - `startup()` - 10-step startup sequence
-  - `shutdown()` - graceful cleanup
-  - `run()` - main loop
-  - Signal handlers (SIGINT, SIGTERM, atexit)
-  - Archie auto-restart with --resume
+### What was wired:
 
-### Also updated:
-- `arch/mcp_server.py` - Added `stop()` method for graceful shutdown, `start(background=True)` for non-blocking
+**`_handle_spawn_agent(role, assignment, context, skip_permissions)`:**
+- Looks up role in `agent_pool` config
+- Validates `max_instances` and `max_concurrent_agents` limits
+- Creates worktree via `WorktreeManager.create(agent_id)`
+- Reads persona file for the role
+- Writes CLAUDE.md with persona + assignment + tools
+- Builds `AgentConfig` from pool entry (model, sandbox, permissions)
+- Calls `SessionManager.spawn(config, prompt)`
+- Registers agent in `StateStore`
+- Returns `{agent_id, worktree_path, sandboxed, skip_permissions, status}`
 
-### Startup sequence:
-1. Parse and validate arch.yaml
-2. Initialize state store
-3. Verify git repo
-4. Permission gate (user confirmation for skip_permissions)
-5. Container gate (Docker check, image pull)
-6. GitHub gate (warn only)
-7. Start MCP server (background)
-8. Create Archie's worktree
-9. Spawn Archie session
-10. (Dashboard - Step 9)
+**`_handle_teardown_agent(agent_id)`:**
+- Rejects teardown of Archie
+- Calls `SessionManager.stop(agent_id)`
+- Removes worktree via `WorktreeManager.remove()` (unless `keep_worktrees`)
+- Updates state to remove agent
 
-## CRITICAL: Step 8 Follow-up Required Before Step 9
+**`_handle_request_merge(agent_id, target_branch, pr_title, pr_body)`:**
+- If `pr_title` provided: creates PR via `WorktreeManager.create_pr()`
+- Otherwise: direct merge via `WorktreeManager.merge()`
+- Returns `{status: "approved"|"rejected", pr_url?}`
 
-### Problem
+**`_handle_close_project(summary)`:**
+- Sets `_shutdown_requested = True`
+- Initiates graceful shutdown
 
-The orchestrator spawns Archie, but when Archie calls `spawn_agent`, `teardown_agent`, or `request_merge` via MCP tools, **nothing happens**. The MCP server registers these tools and updates state, but no actual sessions are created, no worktrees are made, and no merges occur. This is the critical missing link — Archie's brain is connected to ARCH, but ARCH's hands aren't wired up.
-
-### What to Build
-
-Wire the orchestrator as the handler for agent lifecycle MCP tools:
-
-**1. `spawn_agent` → Full agent creation:**
-   - Orchestrator receives spawn request (agent role + assignment)
-   - Looks up role in `agent_pool` config entries
-   - Creates worktree via `WorktreeManager.create(agent_id)`
-   - Reads persona file for the role
-   - Writes CLAUDE.md via `WorktreeManager.write_claude_md()` with persona + assignment + available tools
-   - Builds `AgentConfig` from the matching `AgentPoolEntry` (model, sandbox, permissions)
-   - Calls `SessionManager.spawn(config, prompt)`
-   - Registers agent in `StateStore`
-   - Returns agent_id to Archie
-
-**2. `teardown_agent` → Clean agent removal:**
-   - Orchestrator receives teardown request
-   - Calls `SessionManager.stop(agent_id)`
-   - Removes worktree via `WorktreeManager.remove(agent_id)` (unless `keep_worktrees`)
-   - Updates state to reflect removal
-
-**3. `request_merge` → Branch integration:**
-   - Orchestrator receives merge request
-   - Calls `WorktreeManager.merge(agent_id)` or `WorktreeManager.create_pr()` depending on config
-
-### Implementation Pattern
-
-Either:
-- **Callbacks**: Pass handler functions into `MCPServer` that get invoked when these tools are called (e.g., `on_spawn_agent`, `on_teardown_agent`, `on_request_merge`)
-- **Event queue**: MCP tool handlers push events to an `asyncio.Queue`, orchestrator's `run()` loop consumes them
-
-### Tests Needed
-
-- Full lifecycle: spawn_agent → session starts → agent exits → teardown cleans up
-- Spawn with sandbox: spawn_agent with sandboxed role → ContainerizedSession created
-- Spawn with skip_permissions: permissions audit log written
-- Teardown running agent: stop + worktree removal
-- Request merge: worktree merge or PR creation
-- Spawn unknown role: error handling
-- Max instances exceeded: error handling
-
-### Commit
-
-Commit as: `Wire agent lifecycle tools to orchestrator (Step 8 follow-up)`
+### Also added:
+- Agent instance tracking: `_agent_instance_counts` dict
+- Instance count decrement on agent exit
+- `_get_pool_entry(role)` helper
+- `_generate_agent_id(role)` helper
 
 ---
 
@@ -140,7 +94,7 @@ arch/
 │   ├── mcp_server.py       # ✅ Step 4 (+ stop() added in Step 8)
 │   ├── session.py          # ✅ Steps 5 + 7
 │   ├── container.py        # ✅ Step 6
-│   ├── orchestrator.py     # ✅ Step 8
+│   ├── orchestrator.py     # ✅ Step 8 + follow-up
 │   └── dashboard.py        # Step 9
 │
 ├── personas/               # Step 10
@@ -149,23 +103,16 @@ arch/
 
 ## Architecture Notes
 
-### Orchestrator Lifecycle
+### Agent Lifecycle Flow
 ```
-Orchestrator
-  ├── startup()
-  │   ├── parse_config() → ArchConfig
-  │   ├── StateStore(state_dir)
-  │   ├── _permission_gate() → user confirmation
-  │   ├── _container_gate() → Docker check
-  │   ├── _github_gate() → gh auth check
-  │   ├── MCPServer.start(background=True)
-  │   ├── WorktreeManager.create("archie")
-  │   └── SessionManager.spawn(archie_config)
-  ├── run() → main loop, monitors Archie
-  └── shutdown()
-      ├── SessionManager.stop_all()
-      ├── MCPServer.stop()
-      └── WorktreeManager.cleanup_all()
+Archie calls spawn_agent via MCP
+  → MCPServer._handle_spawn_agent
+  → Orchestrator._handle_spawn_agent (via callback)
+    → WorktreeManager.create(agent_id)
+    → WorktreeManager.write_claude_md()
+    → SessionManager.spawn(AgentConfig, prompt)
+    → StateStore.register_agent()
+  ← Returns {agent_id, worktree_path, ...}
 ```
 
 ### Signal Handling
@@ -186,10 +133,10 @@ python -m pytest tests/ -v
 
 ## Commit Pending
 
-Step 8 files need to be committed:
+Step 8 follow-up files need to be committed:
 ```bash
-git add arch/orchestrator.py arch/mcp_server.py tests/test_orchestrator.py HANDOFF.md
-git commit -m "Add orchestrator implementation (Step 8)"
+git add arch/orchestrator.py tests/test_orchestrator.py HANDOFF.md
+git commit -m "Wire agent lifecycle tools to orchestrator (Step 8 follow-up)"
 git push origin main
 ```
 
@@ -200,6 +147,6 @@ source .venv/bin/activate
 python -c "
 from arch.orchestrator import Orchestrator, parse_config
 from arch.mcp_server import MCPServer
-print('Orchestrator ready')
+print('Orchestrator ready with lifecycle wiring')
 "
 ```

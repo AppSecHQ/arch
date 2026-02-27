@@ -520,6 +520,175 @@ class TestCostSummary:
         assert "archie" in captured.out
 
 
+class TestAgentLifecycleHandlers:
+    """Tests for agent lifecycle handlers (spawn, teardown, merge)."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_agent_creates_session(self, orchestrator_with_pool, mock_all_gates):
+        """spawn_agent creates worktree and session."""
+        await orchestrator_with_pool.startup()
+
+        result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build the navbar component"
+        )
+
+        assert "agent_id" in result
+        assert result["agent_id"].startswith("test-agent-")
+        assert "worktree_path" in result
+        assert result["status"] == "spawning"
+
+    @pytest.mark.asyncio
+    async def test_spawn_agent_unknown_role(self, orchestrator_with_pool, mock_all_gates):
+        """spawn_agent rejects unknown roles."""
+        await orchestrator_with_pool.startup()
+
+        result = await orchestrator_with_pool._handle_spawn_agent(
+            role="nonexistent-role",
+            assignment="Do something"
+        )
+
+        assert "error" in result
+        assert "Unknown role" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_agent_max_instances(self, orchestrator_with_pool, mock_all_gates):
+        """spawn_agent respects max_instances limit."""
+        await orchestrator_with_pool.startup()
+
+        # Spawn first instance (max is 1)
+        result1 = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="First task"
+        )
+        assert "agent_id" in result1
+
+        # Try to spawn second instance
+        result2 = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Second task"
+        )
+        assert "error" in result2
+        assert "Max instances" in result2["error"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_agent_sandboxed(self, orchestrator_with_sandbox, mock_all_gates):
+        """spawn_agent creates containerized session for sandboxed role."""
+        await orchestrator_with_sandbox.startup()
+
+        result = await orchestrator_with_sandbox._handle_spawn_agent(
+            role="sandboxed-agent",
+            assignment="Secure task"
+        )
+
+        assert "agent_id" in result
+        assert result["sandboxed"] is True
+
+    @pytest.mark.asyncio
+    async def test_teardown_agent(self, orchestrator_with_pool, mock_all_gates):
+        """teardown_agent stops session and cleans up."""
+        await orchestrator_with_pool.startup()
+
+        # Spawn an agent first
+        spawn_result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build something"
+        )
+        agent_id = spawn_result["agent_id"]
+
+        # Teardown the agent
+        result = await orchestrator_with_pool._handle_teardown_agent(agent_id)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_teardown_archie_rejected(self, orchestrator_with_pool, mock_all_gates):
+        """teardown_agent rejects tearing down Archie."""
+        await orchestrator_with_pool.startup()
+
+        result = await orchestrator_with_pool._handle_teardown_agent("archie")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_request_merge_direct(self, orchestrator_with_pool, mock_all_gates):
+        """request_merge performs direct merge."""
+        await orchestrator_with_pool.startup()
+
+        # Spawn an agent first
+        spawn_result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build something"
+        )
+        agent_id = spawn_result["agent_id"]
+
+        # Mock the merge to succeed
+        orchestrator_with_pool.worktree_manager.merge = Mock(return_value=True)
+
+        result = await orchestrator_with_pool._handle_request_merge(
+            agent_id=agent_id,
+            target_branch="main"
+        )
+
+        assert result["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_request_merge_creates_pr(self, orchestrator_with_pool, mock_all_gates):
+        """request_merge creates PR when title provided."""
+        await orchestrator_with_pool.startup()
+
+        # Spawn an agent first
+        spawn_result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build something"
+        )
+        agent_id = spawn_result["agent_id"]
+
+        # Mock PR creation
+        orchestrator_with_pool.worktree_manager.create_pr = Mock(
+            return_value="https://github.com/owner/repo/pull/123"
+        )
+
+        result = await orchestrator_with_pool._handle_request_merge(
+            agent_id=agent_id,
+            target_branch="main",
+            pr_title="Add navbar component",
+            pr_body="Implements the navbar as specified"
+        )
+
+        assert result["status"] == "approved"
+        assert result["pr_url"] == "https://github.com/owner/repo/pull/123"
+
+    @pytest.mark.asyncio
+    async def test_close_project_triggers_shutdown(self, orchestrator_with_pool, mock_all_gates):
+        """close_project sets shutdown flag."""
+        await orchestrator_with_pool.startup()
+
+        result = await orchestrator_with_pool._handle_close_project("Work complete")
+
+        assert result is True
+        assert orchestrator_with_pool._shutdown_requested is True
+
+    @pytest.mark.asyncio
+    async def test_spawn_decrements_on_exit(self, orchestrator_with_pool, mock_all_gates):
+        """Instance count decrements when agent exits."""
+        await orchestrator_with_pool.startup()
+
+        # Spawn an agent
+        result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build something"
+        )
+        agent_id = result["agent_id"]
+
+        assert orchestrator_with_pool._agent_instance_counts.get("test-agent", 0) == 1
+
+        # Simulate agent exit
+        await orchestrator_with_pool._on_agent_exit(agent_id, 0)
+
+        assert orchestrator_with_pool._agent_instance_counts.get("test-agent", 0) == 0
+
+
 # ============================================================================
 # Helper Functions and Fixtures
 # ============================================================================
@@ -635,3 +804,111 @@ def mock_all_gates(tmp_path):
                         with patch.object(MCPServer, "start", new_callable=AsyncMock):
                             with patch.object(MCPServer, "stop", new_callable=AsyncMock):
                                 yield
+
+
+@pytest.fixture
+def tmp_config_with_pool(tmp_path):
+    """Create a test config with agent pool."""
+    config_path = tmp_path / "arch.yaml"
+    config_path.write_text(yaml.dump({
+        "project": {
+            "name": "Test Project",
+            "description": "A test project",
+            "repo": str(tmp_path)
+        },
+        "archie": {
+            "persona": "personas/archie.md"
+        },
+        "agent_pool": [
+            {
+                "id": "test-agent",
+                "persona": "personas/test.md",
+                "model": "claude-sonnet-4-6",
+                "max_instances": 1
+            }
+        ],
+        "settings": {
+            "state_dir": str(tmp_path / "state"),
+            "mcp_port": 3999,
+            "max_concurrent_agents": 5
+        }
+    }))
+
+    # Create personas
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "archie.md").write_text("# Archie\nLead agent.")
+    (personas_dir / "test.md").write_text("# Test Agent\nA test agent.")
+
+    # Initialize git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "README.md").write_text("# Test")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+    return config_path
+
+
+@pytest.fixture
+def tmp_config_with_sandbox(tmp_path):
+    """Create a test config with sandboxed agent."""
+    config_path = tmp_path / "arch.yaml"
+    config_path.write_text(yaml.dump({
+        "project": {
+            "name": "Test Project",
+            "description": "A test project",
+            "repo": str(tmp_path)
+        },
+        "archie": {
+            "persona": "personas/archie.md"
+        },
+        "agent_pool": [
+            {
+                "id": "sandboxed-agent",
+                "persona": "personas/sandboxed.md",
+                "model": "claude-sonnet-4-6",
+                "max_instances": 1,
+                "sandbox": {
+                    "enabled": True,
+                    "image": "arch-agent:latest"
+                }
+            }
+        ],
+        "settings": {
+            "state_dir": str(tmp_path / "state"),
+            "mcp_port": 3999,
+            "max_concurrent_agents": 5
+        }
+    }))
+
+    # Create personas
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "archie.md").write_text("# Archie\nLead agent.")
+    (personas_dir / "sandboxed.md").write_text("# Sandboxed Agent\nA sandboxed agent.")
+
+    # Initialize git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "README.md").write_text("# Test")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+    return config_path
+
+
+@pytest.fixture
+def orchestrator_with_pool(tmp_config_with_pool, tmp_path):
+    """Create an Orchestrator with agent pool for testing."""
+    return Orchestrator(tmp_config_with_pool)
+
+
+@pytest.fixture
+def orchestrator_with_sandbox(tmp_config_with_sandbox, tmp_path):
+    """Create an Orchestrator with sandboxed agent for testing."""
+    return Orchestrator(tmp_config_with_sandbox)

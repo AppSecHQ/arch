@@ -383,6 +383,11 @@ class Orchestrator:
         self._archie_restart_count = 0
         self._github_enabled = False
 
+        # Agent instance tracking: role -> count of active instances
+        self._agent_instance_counts: dict[str, int] = {}
+        # Agent ID counter for generating unique IDs
+        self._agent_id_counter: int = 0
+
         # Signal handling
         self._original_sigint = None
         self._original_sigterm = None
@@ -667,11 +672,16 @@ class Orchestrator:
                 print("GitHub tools will not be available for this session.")
 
     async def _start_mcp_server(self) -> None:
-        """Start the MCP server."""
+        """Start the MCP server with lifecycle callbacks."""
         self.mcp_server = MCPServer(
             state=self.state,
             port=self.config.settings.mcp_port,
+            repo_path=self.repo_path,
             github_repo=self.config.github.repo if self.config.github and self._github_enabled else None,
+            on_spawn_agent=self._handle_spawn_agent,
+            on_teardown_agent=self._handle_teardown_agent,
+            on_request_merge=self._handle_request_merge,
+            on_close_project=self._handle_close_project,
         )
         await self.mcp_server.start()
         logger.info(f"MCP server listening on port {self.config.settings.mcp_port}")
@@ -773,9 +783,276 @@ class Orchestrator:
         """Handle agent exit callback."""
         logger.info(f"Agent {agent_id} exited with code {exit_code}")
 
+        # Decrement instance count for this agent's role
+        agent = self.state.get_agent(agent_id)
+        if agent and agent.get("role"):
+            role = agent["role"]
+            if role in self._agent_instance_counts:
+                self._agent_instance_counts[role] = max(0, self._agent_instance_counts[role] - 1)
+
         if agent_id == "archie" and exit_code != 0:
             # Archie exited unexpectedly - will be handled by run loop
             pass
+
+    # =========================================================================
+    # Agent Lifecycle Handlers (called by MCP server)
+    # =========================================================================
+
+    def _get_pool_entry(self, role: str) -> Optional[AgentPoolEntry]:
+        """Look up an agent pool entry by role ID."""
+        for entry in self.config.agent_pool:
+            if entry.id == role:
+                return entry
+        return None
+
+    def _generate_agent_id(self, role: str) -> str:
+        """Generate a unique agent ID for a role."""
+        self._agent_id_counter += 1
+        return f"{role}-{self._agent_id_counter}"
+
+    async def _handle_spawn_agent(
+        self,
+        role: str,
+        assignment: str,
+        context: Optional[str] = None,
+        skip_permissions: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Handle spawn_agent request from Archie.
+
+        Creates worktree, writes CLAUDE.md, spawns session.
+        """
+        logger.info(f"Spawn request: role={role}, assignment={assignment[:50]}...")
+
+        # Look up role in agent pool
+        pool_entry = self._get_pool_entry(role)
+        if not pool_entry:
+            logger.error(f"Unknown role: {role}")
+            return {"error": f"Unknown role: {role}. Available roles: {[e.id for e in self.config.agent_pool]}"}
+
+        # Check max instances
+        current_count = self._agent_instance_counts.get(role, 0)
+        if current_count >= pool_entry.max_instances:
+            logger.warning(f"Max instances ({pool_entry.max_instances}) reached for role {role}")
+            return {"error": f"Max instances ({pool_entry.max_instances}) reached for role {role}"}
+
+        # Check max concurrent agents
+        running_count = len(self.session_manager.list_running_sessions())
+        if running_count >= self.config.settings.max_concurrent_agents:
+            logger.warning(f"Max concurrent agents ({self.config.settings.max_concurrent_agents}) reached")
+            return {"error": f"Max concurrent agents ({self.config.settings.max_concurrent_agents}) reached"}
+
+        # Validate skip_permissions request
+        actual_skip_permissions = False
+        if skip_permissions:
+            if pool_entry.permissions.skip_permissions:
+                actual_skip_permissions = True
+            else:
+                logger.warning(f"skip_permissions requested for {role} but not configured in pool")
+
+        # Generate unique agent ID
+        agent_id = self._generate_agent_id(role)
+
+        try:
+            # Create worktree
+            logger.info(f"Creating worktree for {agent_id}...")
+            worktree_path = self.worktree_manager.create(agent_id)
+
+            # Read persona file
+            persona_path = self.repo_path / pool_entry.persona
+            if persona_path.exists():
+                persona_content = persona_path.read_text()
+            else:
+                logger.warning(f"Persona not found at {persona_path}, using default")
+                persona_content = f"# {role}\n\nYou are a {role} agent."
+
+            # Build available tools list (worker tools only)
+            available_tools = ["send_message", "get_messages", "update_status", "report_completion"]
+
+            # Write CLAUDE.md
+            full_assignment = assignment
+            if context:
+                full_assignment = f"{assignment}\n\nAdditional context:\n{context}"
+
+            # Get active agents for context
+            active_agents = {
+                a["id"]: a["role"]
+                for a in self.state.list_agents()
+                if a["status"] not in ("done", "error")
+            }
+
+            self.worktree_manager.write_claude_md(
+                agent_id=agent_id,
+                persona_content=persona_content,
+                assignment=full_assignment,
+                project_name=self.config.project.name,
+                project_description=self.config.project.description,
+                active_agents=active_agents,
+                available_tools=available_tools,
+            )
+
+            # Register agent in state
+            self.state.register_agent(
+                agent_id=agent_id,
+                role=role,
+                worktree=str(worktree_path),
+                sandboxed=pool_entry.sandbox.enabled,
+                skip_permissions=actual_skip_permissions,
+            )
+
+            # Build AgentConfig
+            agent_config = AgentConfig(
+                agent_id=agent_id,
+                role=role,
+                model=pool_entry.model,
+                worktree=str(worktree_path),
+                sandboxed=pool_entry.sandbox.enabled,
+                skip_permissions=actual_skip_permissions,
+                container_image=pool_entry.sandbox.image,
+                container_memory_limit=pool_entry.sandbox.memory_limit,
+                container_cpus=pool_entry.sandbox.cpus,
+                container_network=pool_entry.sandbox.network,
+                container_extra_mounts=pool_entry.sandbox.extra_mounts,
+            )
+
+            # Spawn session
+            logger.info(f"Spawning session for {agent_id}...")
+            session = await self.session_manager.spawn(agent_config, full_assignment)
+
+            if not session:
+                # Cleanup on failure
+                self.worktree_manager.remove(agent_id)
+                self.state.remove_agent(agent_id)
+                return {"error": f"Failed to spawn session for {agent_id}"}
+
+            # Update instance count
+            self._agent_instance_counts[role] = current_count + 1
+
+            logger.info(f"Agent {agent_id} spawned successfully")
+            return {
+                "agent_id": agent_id,
+                "worktree_path": str(worktree_path),
+                "sandboxed": pool_entry.sandbox.enabled,
+                "skip_permissions": actual_skip_permissions,
+                "status": "spawning"
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to spawn agent {agent_id}: {e}")
+            # Cleanup
+            try:
+                self.worktree_manager.remove(agent_id)
+            except Exception:
+                pass
+            try:
+                self.state.remove_agent(agent_id)
+            except Exception:
+                pass
+            return {"error": str(e)}
+
+    async def _handle_teardown_agent(self, agent_id: str) -> bool:
+        """
+        Handle teardown_agent request from Archie.
+
+        Stops session and removes worktree.
+        """
+        logger.info(f"Teardown request for agent: {agent_id}")
+
+        if agent_id == "archie":
+            logger.warning("Cannot teardown Archie")
+            return False
+
+        try:
+            # Stop the session
+            if self.session_manager:
+                stopped = await self.session_manager.stop(agent_id)
+                if stopped:
+                    logger.info(f"Stopped session for {agent_id}")
+                self.session_manager.remove_session(agent_id)
+
+            # Remove worktree (unless keep_worktrees is set)
+            if self.worktree_manager and not self.keep_worktrees:
+                try:
+                    self.worktree_manager.remove(agent_id)
+                    logger.info(f"Removed worktree for {agent_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove worktree for {agent_id}: {e}")
+
+            # Update state
+            if self.state:
+                self.state.remove_agent(agent_id)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to teardown agent {agent_id}: {e}")
+            return False
+
+    async def _handle_request_merge(
+        self,
+        agent_id: str,
+        target_branch: str = "main",
+        pr_title: Optional[str] = None,
+        pr_body: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Handle request_merge request from Archie.
+
+        Merges worktree branch or creates a PR.
+        """
+        logger.info(f"Merge request for agent: {agent_id} -> {target_branch}")
+
+        if not self.worktree_manager:
+            return {"status": "rejected", "error": "Worktree manager not available"}
+
+        # Check if worktree exists
+        worktree_path = self.worktree_manager.get_worktree_path(agent_id)
+        if not worktree_path:
+            return {"status": "rejected", "error": f"No worktree found for {agent_id}"}
+
+        try:
+            if pr_title:
+                # Create PR instead of direct merge
+                logger.info(f"Creating PR: {pr_title}")
+                pr_url = self.worktree_manager.create_pr(
+                    agent_id=agent_id,
+                    target_branch=target_branch,
+                    title=pr_title,
+                    body=pr_body or "",
+                )
+                if pr_url:
+                    return {"status": "approved", "pr_url": pr_url}
+                else:
+                    return {"status": "rejected", "error": "Failed to create PR"}
+            else:
+                # Direct merge
+                # Check if auto_merge is enabled or require approval
+                if "merge" in self.config.settings.require_user_approval and not self.config.settings.auto_merge:
+                    # Would need escalation - for now just log
+                    logger.info(f"Merge requires approval (not implemented in this step)")
+                    # TODO: Integrate with escalate_to_user when dashboard is ready
+
+                logger.info(f"Merging {agent_id} into {target_branch}")
+                success = self.worktree_manager.merge(agent_id, target_branch)
+                if success:
+                    return {"status": "approved"}
+                else:
+                    return {"status": "rejected", "error": "Merge failed"}
+
+        except Exception as e:
+            logger.error(f"Merge failed for {agent_id}: {e}")
+            return {"status": "rejected", "error": str(e)}
+
+    async def _handle_close_project(self, summary: str) -> bool:
+        """
+        Handle close_project request from Archie.
+
+        Initiates graceful shutdown.
+        """
+        logger.info(f"Close project requested: {summary}")
+        print(f"\n✓ Project closing: {summary}")
+        self._shutdown_requested = True
+        return True
 
     async def _handle_archie_exit(self) -> None:
         """Handle unexpected Archie exit."""
