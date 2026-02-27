@@ -52,6 +52,59 @@ Step 8 (Orchestrator) is complete but not yet committed.
 9. Spawn Archie session
 10. (Dashboard - Step 9)
 
+## CRITICAL: Step 8 Follow-up Required Before Step 9
+
+### Problem
+
+The orchestrator spawns Archie, but when Archie calls `spawn_agent`, `teardown_agent`, or `request_merge` via MCP tools, **nothing happens**. The MCP server registers these tools and updates state, but no actual sessions are created, no worktrees are made, and no merges occur. This is the critical missing link — Archie's brain is connected to ARCH, but ARCH's hands aren't wired up.
+
+### What to Build
+
+Wire the orchestrator as the handler for agent lifecycle MCP tools:
+
+**1. `spawn_agent` → Full agent creation:**
+   - Orchestrator receives spawn request (agent role + assignment)
+   - Looks up role in `agent_pool` config entries
+   - Creates worktree via `WorktreeManager.create(agent_id)`
+   - Reads persona file for the role
+   - Writes CLAUDE.md via `WorktreeManager.write_claude_md()` with persona + assignment + available tools
+   - Builds `AgentConfig` from the matching `AgentPoolEntry` (model, sandbox, permissions)
+   - Calls `SessionManager.spawn(config, prompt)`
+   - Registers agent in `StateStore`
+   - Returns agent_id to Archie
+
+**2. `teardown_agent` → Clean agent removal:**
+   - Orchestrator receives teardown request
+   - Calls `SessionManager.stop(agent_id)`
+   - Removes worktree via `WorktreeManager.remove(agent_id)` (unless `keep_worktrees`)
+   - Updates state to reflect removal
+
+**3. `request_merge` → Branch integration:**
+   - Orchestrator receives merge request
+   - Calls `WorktreeManager.merge(agent_id)` or `WorktreeManager.create_pr()` depending on config
+
+### Implementation Pattern
+
+Either:
+- **Callbacks**: Pass handler functions into `MCPServer` that get invoked when these tools are called (e.g., `on_spawn_agent`, `on_teardown_agent`, `on_request_merge`)
+- **Event queue**: MCP tool handlers push events to an `asyncio.Queue`, orchestrator's `run()` loop consumes them
+
+### Tests Needed
+
+- Full lifecycle: spawn_agent → session starts → agent exits → teardown cleans up
+- Spawn with sandbox: spawn_agent with sandboxed role → ContainerizedSession created
+- Spawn with skip_permissions: permissions audit log written
+- Teardown running agent: stop + worktree removal
+- Request merge: worktree merge or PR creation
+- Spawn unknown role: error handling
+- Max instances exceeded: error handling
+
+### Commit
+
+Commit as: `Wire agent lifecycle tools to orchestrator (Step 8 follow-up)`
+
+---
+
 ## Next Steps
 
 ### Step 9: Dashboard (`arch/dashboard.py`)
