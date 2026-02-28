@@ -2,35 +2,32 @@
 
 ## Current State
 
-**Steps Completed: 1-12 of 13**
-**Tests: 388 passing**
-**Last Commit:** (pending)
+**Steps Completed: 1-13 of 13** ✅
+**Tests: 423 passing**
+**Last Commit:** 15cabc5
 
 ## Completed Components
 
 | Step | File | Description | Tests |
 |------|------|-------------|-------|
-| 1 | `arch/state.py` | Thread-safe state store, JSON persistence, enum validation | 50 |
+| 1 | `arch/state.py` | Thread-safe state store, JSON persistence, enum validation | 55 |
 | 2 | `arch/worktree.py` | Git worktree create/remove/merge, CLAUDE.md injection | 28 |
 | 3 | `arch/token_tracker.py` | Stream-json parsing, cost calculation, pricing.yaml | 32 |
 | 4 | `arch/mcp_server.py` | SSE/HTTP MCP server, access controls, all tools, stop() | 40 |
 | 5 | `arch/session.py` | Local claude subprocess, output parsing, resume | 34 |
 | 6 | `arch/container.py` | Docker spawn/stop, volume mounts, Dockerfile | 40 |
 | 7 | `arch/session.py` | Unified Session/Container interface, ContainerizedSession | 16 |
-| 8 | `arch/orchestrator.py` | Config parsing, gates, startup/shutdown, lifecycle wiring | 43 |
+| 8 | `arch/orchestrator.py` | Config parsing, gates, startup/shutdown, lifecycle wiring | 53 |
 | 9 | `arch/dashboard.py` | Textual TUI with agents/activity/costs panels, escalations | 43 |
 | 10 | `personas/*.md` | archie, frontend, backend, qa, security, copywriter personas | - |
 | 11 | `tests/test_mcp_server.py` | GitHub tools integration tests (mocked gh CLI) | 22 |
 | 11.5 | `arch/*.py` | Agent state persistence: context field, save_progress tool, CLAUDE.md injection | 16 |
-| 12 | `arch.py` | CLI entrypoint: up/down/status/init commands, PID file, GitHub label setup | 27 |
+| 12 | `arch.py` | CLI entrypoint: up/down/status/init/send commands, PID file, GitHub label setup | 31 |
+| 13 | `tests/test_integration.py` | End-to-end integration tests with real git operations | 16 |
 
-## Next Step: Step 13 — Integration Test
+## All Steps Complete
 
-End-to-end test with real git repo: Archie + 1 local agent + 1 sandboxed agent + GitHub Issues.
-
-## Remaining Step
-
-13. **Integration test** — End-to-end with real git repo
+ARCH v1 implementation is complete per SPEC-AGENT-HARNESS.md.
 
 ---
 
