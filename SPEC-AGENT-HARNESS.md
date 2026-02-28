@@ -268,6 +268,21 @@ report_completion
     summary: string     # what was accomplished
     artifacts: [string] # list of files created or modified
   returns: { ok: bool }
+
+save_progress
+  description: "Persist structured session state for continuity across context compactions and restarts.
+                Call periodically during long tasks and before signaling completion."
+  params:
+    files_modified: [string]   # files created or changed this session
+    progress: string           # what has been accomplished so far
+    next_steps: string         # what remains to be done
+    blockers: string?          # current blockers, if any
+    decisions: [string]?       # architectural/scope decisions made this session
+  returns: { ok: bool }
+  # Stored in StateStore agents.json under the agent's "context" field.
+  # On agent resume/restart, the orchestrator injects this into the agent's
+  # CLAUDE.md as a "## Session State" section so the new session has full continuity.
+  # See: https://github.com/AppSecHQ/arch/issues/1
 ```
 
 #### MCP Tools — Available to Archie ONLY
@@ -628,7 +643,14 @@ State = {
             "sandboxed": bool,
             "skip_permissions": bool,
             "spawned_at": str,
-            "usage": { ... }         # from token_tracker
+            "usage": { ... },        # from token_tracker
+            "context": {             # persisted by save_progress MCP tool (see #1)
+                "files_modified": [str],
+                "progress": str,
+                "next_steps": str,
+                "blockers": str,     # null if none
+                "decisions": [str]
+            }
         }
     },
     "messages": [
@@ -728,7 +750,7 @@ Each persona is a markdown file written in CLAUDE.md style for that role. The ha
 - **Your agent ID:** {agent_id}
 - **Project:** {project_name} — {project_description}
 - **Your worktree path:** {worktree_path}
-- **Available MCP tools (via "arch" server):** send_message, get_messages, update_status, report_completion
+- **Available MCP tools (via "arch" server):** send_message, get_messages, update_status, save_progress, report_completion
 - **Active team members:** {comma-separated list of agent_id: role}
 - **Your assignment:** {assignment}
 <!-- END ARCH CONTEXT -->
@@ -811,8 +833,9 @@ Build and verify each layer before building on it:
 9. **Dashboard** (`dashboard.py`) — Textual layout, live state binding, `[c]`/`[!]` indicators, user input for decisions
 10. **Persona files** — write default personas for: archie, frontend, backend, qa, security, copywriter
 11. **GitHub tools** — implement all `gh_*` MCP tools as `gh` CLI wrappers; test against a real repo; handle missing `gh` gracefully
+11.5. **Agent state persistence** — `context` field in StateStore, `save_progress` MCP tool, CLAUDE.md injection on resume/restart. See [#1](https://github.com/AppSecHQ/arch/issues/1).
 12. **CLI entrypoint** (`arch.py`) — argument parsing, `init` scaffold command, `--github` flag for label/milestone setup, default Dockerfile
-13. **Integration test** — end-to-end run against a real git repo: Archie + 1 local agent + 1 sandboxed agent + GitHub Issues enabled
+13. **Integration test** — end-to-end run against a real git repo: Archie + 1 local agent + 1 sandboxed agent + GitHub Issues enabled. Should exercise agent state persistence (spawn → save_progress → teardown → verify context persisted).
 
 ---
 
