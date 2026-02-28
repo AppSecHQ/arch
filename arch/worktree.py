@@ -147,8 +147,12 @@ class WorktreeManager:
             raise WorktreeError(f"Worktree does not exist: {worktree_path}")
 
         # Format active agents list
+        # active_agents can be list of tuples or dict
         if active_agents:
-            agents_str = ", ".join(f"{aid}: {role}" for aid, role in active_agents)
+            if isinstance(active_agents, dict):
+                agents_str = ", ".join(f"{aid}: {role}" for aid, role in active_agents.items())
+            else:
+                agents_str = ", ".join(f"{aid}: {role}" for aid, role in active_agents)
         else:
             agents_str = "(none yet)"
 
