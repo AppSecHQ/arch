@@ -2,8 +2,8 @@
 
 ## Current State
 
-**Steps Completed: 1-11.5 of 13**
-**Tests: 361 passing**
+**Steps Completed: 1-12 of 13**
+**Tests: 388 passing**
 **Last Commit:** (pending)
 
 ## Completed Components
@@ -22,18 +22,14 @@
 | 10 | `personas/*.md` | archie, frontend, backend, qa, security, copywriter personas | - |
 | 11 | `tests/test_mcp_server.py` | GitHub tools integration tests (mocked gh CLI) | 22 |
 | 11.5 | `arch/*.py` | Agent state persistence: context field, save_progress tool, CLAUDE.md injection | 16 |
+| 12 | `arch.py` | CLI entrypoint: up/down/status/init commands, PID file, GitHub label setup | 27 |
 
-## Next Step: Step 12 — CLI Entrypoint
+## Next Step: Step 13 — Integration Test
 
-Build `arch.py` with commands:
-- `arch up [--config arch.yaml] [--keep-worktrees]` — Start ARCH and launch Archie
-- `arch down` — Gracefully shut down all agents and clean up
-- `arch status` — Show current state of a running ARCH session
-- `arch init [--name "My Project"] [--github owner/repo]` — Scaffold arch.yaml + personas/ + BRIEF.md
+End-to-end test with real git repo: Archie + 1 local agent + 1 sandboxed agent + GitHub Issues.
 
-## Remaining Steps (12-13)
+## Remaining Step
 
-12. **CLI entrypoint** — `arch up/down/status/init` commands
 13. **Integration test** — End-to-end with real git repo
 
 ---

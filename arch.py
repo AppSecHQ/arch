@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""
+ARCH CLI - Agent Runtime & Coordination Harness
+
+Usage:
+  arch up [--config arch.yaml] [--keep-worktrees]
+        Start ARCH and launch Archie
+
+  arch down
+        Gracefully shut down all agents and clean up
+
+  arch status
+        Show current state of a running ARCH session
+
+  arch init [--name "My Project"] [--github owner/repo]
+        Scaffold arch.yaml + personas/ + BRIEF.md in current directory.
+        If --github is provided: creates labels and default milestones in the repo.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import signal
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+# ASCII art banner
+BANNER = r"""
+    _   ____   ____  _   _
+   / \ |  _ \ / ___|| | | |
+  / _ \| |_) | |    | |_| |
+ / ___ \  _ <| |___ |  _  |
+/_/   \_\_| \_\____|_| |_|
+
+"""
+
+# Default config file name
+DEFAULT_CONFIG = "arch.yaml"
+
+# PID file for tracking running instance
+PID_FILE = "state/arch.pid"
+
+
+def print_banner():
+    """Print the ARCH banner."""
+    print(BANNER)
+
+
+def get_state_dir(config_path: Path) -> Path:
+    """Get the state directory from config or use default."""
+    import yaml
+
+    if config_path.exists():
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        return Path(config.get("settings", {}).get("state_dir", "./state"))
+    return Path("./state")
+
+
+def write_pid_file(state_dir: Path) -> None:
+    """Write current PID to file."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = state_dir / "arch.pid"
+    pid_path.write_text(str(os.getpid()))
+
+
+def read_pid_file(state_dir: Path) -> Optional[int]:
+    """Read PID from file. Returns None if no running instance."""
+    pid_path = state_dir / "arch.pid"
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text().strip())
+        # Check if process is actually running
+        os.kill(pid, 0)
+        return pid
+    except (ValueError, OSError):
+        return None
+
+
+def remove_pid_file(state_dir: Path) -> None:
+    """Remove PID file."""
+    pid_path = state_dir / "arch.pid"
+    if pid_path.exists():
+        pid_path.unlink()
+
+
+# ============================================================================
+# arch up
+# ============================================================================
+
+
+async def cmd_up(args: argparse.Namespace) -> int:
+    """Start ARCH and launch Archie."""
+    from arch.orchestrator import Orchestrator
+    from arch.dashboard import run_dashboard
+
+    config_path = Path(args.config)
+
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}")
+        print("Run 'arch init' to create a new project.")
+        return 1
+
+    state_dir = get_state_dir(config_path)
+
+    # Check if already running
+    existing_pid = read_pid_file(state_dir)
+    if existing_pid:
+        print(f"Error: ARCH is already running (PID {existing_pid})")
+        print("Use 'arch status' to check the current state or 'arch down' to stop.")
+        return 1
+
+    print_banner()
+    print(f"Starting ARCH with config: {config_path}")
+    print()
+
+    # Write PID file
+    write_pid_file(state_dir)
+
+    orchestrator = Orchestrator(config_path, keep_worktrees=args.keep_worktrees)
+
+    try:
+        if not await orchestrator.startup():
+            remove_pid_file(state_dir)
+            return 1
+
+        # Run dashboard (this blocks until shutdown)
+        await run_dashboard(
+            state=orchestrator.state,
+            token_tracker=orchestrator.token_tracker,
+            mcp_server=orchestrator.mcp_server,
+            project_name=orchestrator.config.project.name,
+            token_budget_usd=orchestrator.config.settings.token_budget_usd,
+        )
+
+        return 0
+
+    except KeyboardInterrupt:
+        print("\nShutdown requested...")
+        return 0
+
+    finally:
+        await orchestrator.shutdown()
+        remove_pid_file(state_dir)
+
+
+# ============================================================================
+# arch down
+# ============================================================================
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    """Gracefully shut down all agents and clean up."""
+    config_path = Path(args.config)
+    state_dir = get_state_dir(config_path)
+
+    pid = read_pid_file(state_dir)
+    if not pid:
+        print("ARCH is not running.")
+        return 0
+
+    print(f"Sending shutdown signal to ARCH (PID {pid})...")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print("Shutdown signal sent. ARCH will shut down gracefully.")
+        return 0
+    except OSError as e:
+        print(f"Error sending signal: {e}")
+        return 1
+
+
+# ============================================================================
+# arch status
+# ============================================================================
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show current state of a running ARCH session."""
+    config_path = Path(args.config)
+    state_dir = get_state_dir(config_path)
+
+    pid = read_pid_file(state_dir)
+
+    print("ARCH Status")
+    print("=" * 40)
+
+    if pid:
+        print(f"Status: Running (PID {pid})")
+    else:
+        print("Status: Not running")
+
+    # Try to read state files
+    agents_path = state_dir / "agents.json"
+    project_path = state_dir / "project.json"
+
+    if project_path.exists():
+        with open(project_path) as f:
+            project = json.load(f)
+        print(f"Project: {project.get('name', 'Unknown')}")
+        if project.get("started_at"):
+            started = project["started_at"]
+            print(f"Started: {started}")
+
+    if agents_path.exists():
+        with open(agents_path) as f:
+            agents = json.load(f)
+
+        print()
+        print("Agents:")
+        print("-" * 40)
+
+        if not agents:
+            print("  (none)")
+        else:
+            for agent_id, agent in agents.items():
+                status = agent.get("status", "unknown")
+                role = agent.get("role", "unknown")
+                task = agent.get("task", "")
+                sandboxed = "[c]" if agent.get("sandboxed") else ""
+                skip_perms = "[!]" if agent.get("skip_permissions") else ""
+                flags = f"{sandboxed}{skip_perms}"
+                if flags:
+                    flags = f" {flags}"
+                print(f"  {agent_id}{flags}: {status}")
+                if task:
+                    print(f"    └─ {task[:50]}...")
+
+    # Show token usage if available
+    usage_path = state_dir / "token_usage.json"
+    if usage_path.exists():
+        with open(usage_path) as f:
+            usage = json.load(f)
+
+        print()
+        print("Token Usage:")
+        print("-" * 40)
+
+        total_cost = 0.0
+        for agent_id, data in usage.items():
+            cost = data.get("cost_usd", 0.0)
+            total_cost += cost
+            print(f"  {agent_id}: ${cost:.4f}")
+
+        print(f"  {'─' * 20}")
+        print(f"  Total: ${total_cost:.4f}")
+
+    return 0
+
+
+# ============================================================================
+# arch init
+# ============================================================================
+
+
+DEFAULT_ARCH_YAML = '''# ARCH Configuration
+# See: https://github.com/AppSecHQ/arch
+
+project:
+  name: "{project_name}"
+  description: "{project_description}"
+  repo: "."
+
+archie:
+  persona: "personas/archie.md"
+  model: "claude-opus-4-5"
+
+agent_pool:
+  - id: frontend
+    persona: "personas/frontend.md"
+    model: "claude-sonnet-4-6"
+    max_instances: 2
+
+  - id: backend
+    persona: "personas/backend.md"
+    model: "claude-sonnet-4-6"
+    max_instances: 2
+
+  - id: qa
+    persona: "personas/qa.md"
+    model: "claude-sonnet-4-6"
+    max_instances: 1
+
+settings:
+  max_concurrent_agents: 5
+  state_dir: "./state"
+  mcp_port: 3999
+  # token_budget_usd: 10.00
+  # auto_merge: false
+'''
+
+DEFAULT_BRIEF_MD = '''# {project_name}
+
+## Goals
+
+<!-- What does success look like? Be specific. -->
+
+## Done When
+
+<!-- Concrete, testable criteria for completion -->
+- [ ]
+
+## Constraints
+
+<!-- Technical requirements, time limits, scope boundaries -->
+
+## Current Status
+
+<!-- Updated by Archie throughout the session -->
+Not started.
+
+## Decisions Log
+
+| Date | Decision |
+|------|----------|
+'''
+
+DEFAULT_GITIGNORE_ADDITIONS = '''
+# ARCH
+state/
+.worktrees/
+'''
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Scaffold arch.yaml + personas/ + BRIEF.md in current directory."""
+    project_name = args.name or "My Project"
+    project_description = args.description or "A new ARCH project"
+    github_repo = args.github
+
+    print(f"Initializing ARCH project: {project_name}")
+    print()
+
+    # Create directories
+    personas_dir = Path("personas")
+    state_dir = Path("state")
+
+    personas_dir.mkdir(exist_ok=True)
+    state_dir.mkdir(exist_ok=True)
+
+    # Create arch.yaml
+    arch_yaml = Path("arch.yaml")
+    if arch_yaml.exists():
+        print(f"  ⚠  arch.yaml already exists, skipping")
+    else:
+        content = DEFAULT_ARCH_YAML.format(
+            project_name=project_name,
+            project_description=project_description,
+        )
+        if github_repo:
+            content += f'''
+github:
+  repo: "{github_repo}"
+  default_branch: "main"
+  labels:
+    - name: "agent:archie"
+      color: "7057ff"
+    - name: "agent:frontend"
+      color: "0075ca"
+    - name: "agent:backend"
+      color: "e99695"
+    - name: "agent:qa"
+      color: "008672"
+'''
+        arch_yaml.write_text(content)
+        print(f"  ✓  Created arch.yaml")
+
+    # Create BRIEF.md
+    brief_md = Path("BRIEF.md")
+    if brief_md.exists():
+        print(f"  ⚠  BRIEF.md already exists, skipping")
+    else:
+        brief_md.write_text(DEFAULT_BRIEF_MD.format(project_name=project_name))
+        print(f"  ✓  Created BRIEF.md")
+
+    # Copy persona files if they don't exist
+    personas_to_copy = ["archie", "frontend", "backend", "qa", "security", "copywriter"]
+    source_personas = Path(__file__).parent / "personas"
+
+    for persona in personas_to_copy:
+        target = personas_dir / f"{persona}.md"
+        source = source_personas / f"{persona}.md"
+
+        if target.exists():
+            print(f"  ⚠  personas/{persona}.md already exists, skipping")
+        elif source.exists():
+            target.write_text(source.read_text())
+            print(f"  ✓  Created personas/{persona}.md")
+        else:
+            # Create minimal persona if source doesn't exist
+            target.write_text(f"# {persona.title()}\n\nYou are a {persona} agent.\n")
+            print(f"  ✓  Created personas/{persona}.md (minimal)")
+
+    # Update .gitignore
+    gitignore = Path(".gitignore")
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if "state/" not in content:
+            with open(gitignore, "a") as f:
+                f.write(DEFAULT_GITIGNORE_ADDITIONS)
+            print(f"  ✓  Updated .gitignore")
+        else:
+            print(f"  ⚠  .gitignore already has ARCH entries")
+    else:
+        gitignore.write_text(DEFAULT_GITIGNORE_ADDITIONS.strip() + "\n")
+        print(f"  ✓  Created .gitignore")
+
+    # GitHub setup
+    if github_repo:
+        print()
+        print("Setting up GitHub repository...")
+        setup_github(github_repo)
+
+    print()
+    print("Done! Next steps:")
+    print("  1. Edit BRIEF.md to describe your project goals")
+    print("  2. Review arch.yaml configuration")
+    print("  3. Run 'arch up' to start")
+
+    return 0
+
+
+def setup_github(repo: str) -> None:
+    """Create labels and milestone in GitHub repo."""
+    labels = [
+        ("agent:archie", "7057ff", "Work by Archie (lead agent)"),
+        ("agent:frontend", "0075ca", "Work by frontend agent"),
+        ("agent:backend", "e99695", "Work by backend agent"),
+        ("agent:qa", "008672", "Work by QA agent"),
+        ("phase:0", "c5def5", "Initial phase"),
+        ("phase:1", "bfd4f2", "Phase 1"),
+        ("blocked", "d93f0b", "Blocked on external dependency"),
+    ]
+
+    print(f"  Creating labels in {repo}...")
+
+    for name, color, description in labels:
+        cmd = [
+            "gh", "label", "create", name,
+            "--repo", repo,
+            "--color", color,
+            "--description", description,
+            "--force",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                print(f"    ✓  Label: {name}")
+            else:
+                print(f"    ⚠  Label {name}: {result.stderr.strip()}")
+        except FileNotFoundError:
+            print("    ✗  gh CLI not found. Install from https://cli.github.com/")
+            return
+        except subprocess.TimeoutExpired:
+            print(f"    ✗  Timeout creating label {name}")
+
+    # Create initial milestone
+    print(f"  Creating initial milestone...")
+    due_date = (datetime.now(timezone.utc).replace(day=1) +
+                __import__("datetime").timedelta(days=32)).strftime("%Y-%m-%d")
+
+    cmd = [
+        "gh", "api", f"repos/{repo}/milestones",
+        "-X", "POST",
+        "-f", "title=Sprint 1",
+        "-f", "description=Initial sprint",
+        "-f", f"due_on={due_date}T00:00:00Z",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print(f"    ✓  Milestone: Sprint 1")
+        else:
+            # Might already exist
+            if "already_exists" in result.stderr.lower():
+                print(f"    ⚠  Milestone Sprint 1 already exists")
+            else:
+                print(f"    ⚠  Milestone: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        print(f"    ✗  Timeout creating milestone")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+
+def main() -> int:
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        prog="arch",
+        description="ARCH - Agent Runtime & Coordination Harness",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Commands:
+  up      Start ARCH and launch Archie
+  down    Gracefully shut down all agents
+  status  Show current state of running session
+  init    Scaffold a new ARCH project
+
+Examples:
+  arch init --name "My App" --github myorg/myapp
+  arch up
+  arch status
+  arch down
+"""
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # arch up
+    up_parser = subparsers.add_parser("up", help="Start ARCH and launch Archie")
+    up_parser.add_argument(
+        "--config", "-c",
+        default=DEFAULT_CONFIG,
+        help=f"Path to config file (default: {DEFAULT_CONFIG})"
+    )
+    up_parser.add_argument(
+        "--keep-worktrees",
+        action="store_true",
+        help="Don't remove worktrees on shutdown"
+    )
+
+    # arch down
+    down_parser = subparsers.add_parser("down", help="Gracefully shut down")
+    down_parser.add_argument(
+        "--config", "-c",
+        default=DEFAULT_CONFIG,
+        help=f"Path to config file (default: {DEFAULT_CONFIG})"
+    )
+
+    # arch status
+    status_parser = subparsers.add_parser("status", help="Show current state")
+    status_parser.add_argument(
+        "--config", "-c",
+        default=DEFAULT_CONFIG,
+        help=f"Path to config file (default: {DEFAULT_CONFIG})"
+    )
+
+    # arch init
+    init_parser = subparsers.add_parser("init", help="Scaffold a new project")
+    init_parser.add_argument(
+        "--name", "-n",
+        help="Project name"
+    )
+    init_parser.add_argument(
+        "--description", "-d",
+        help="Project description"
+    )
+    init_parser.add_argument(
+        "--github", "-g",
+        metavar="OWNER/REPO",
+        help="GitHub repo to configure (creates labels/milestones)"
+    )
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    if args.command == "up":
+        return asyncio.run(cmd_up(args))
+    elif args.command == "down":
+        return cmd_down(args)
+    elif args.command == "status":
+        return cmd_status(args)
+    elif args.command == "init":
+        return cmd_init(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
