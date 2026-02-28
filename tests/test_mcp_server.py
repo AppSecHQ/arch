@@ -497,6 +497,323 @@ class TestGitHubTools:
             assert "error" in result
             assert "timed out" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_gh_update_issue_mocked(self, mcp_server_with_github):
+        """gh_update_issue calls gh CLI correctly."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="")
+
+            result = await mcp_server_with_github._handle_gh_update_issue(
+                issue_number=42,
+                add_labels=["priority:high"],
+                remove_labels=["needs-triage"],
+                milestone="Sprint 1",
+                assignee="developer1"
+            )
+
+            assert result["ok"] is True
+            assert result.get("error") is None
+
+            # Verify CLI was called with correct arguments
+            call_args = mock_run.call_args[0][0]
+            assert "gh" in call_args
+            assert "issue" in call_args
+            assert "edit" in call_args
+            assert "42" in call_args
+            assert "--add-label" in call_args
+            assert "--remove-label" in call_args
+            assert "--milestone" in call_args
+            assert "--add-assignee" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_update_issue_without_github(self, mcp_server):
+        """gh_update_issue fails without GitHub config."""
+        result = await mcp_server._handle_gh_update_issue(
+            issue_number=42,
+            add_labels=["bug"]
+        )
+
+        assert "error" in result
+        assert "not configured" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_gh_add_comment_mocked(self, mcp_server_with_github):
+        """gh_add_comment calls gh CLI correctly."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="")
+
+            result = await mcp_server_with_github._handle_gh_add_comment(
+                issue_number=42,
+                body="This is a progress update."
+            )
+
+            assert result["ok"] is True
+
+            # Verify CLI was called correctly
+            call_args = mock_run.call_args[0][0]
+            assert "gh" in call_args
+            assert "issue" in call_args
+            assert "comment" in call_args
+            assert "42" in call_args
+            assert "--body" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_add_comment_without_github(self, mcp_server):
+        """gh_add_comment fails without GitHub config."""
+        result = await mcp_server._handle_gh_add_comment(
+            issue_number=42,
+            body="Comment"
+        )
+
+        assert "error" in result
+        assert "not configured" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_gh_create_milestone_mocked(self, mcp_server_with_github):
+        """gh_create_milestone calls gh API correctly."""
+        mock_response = json.dumps({
+            "number": 1,
+            "html_url": "https://github.com/test/repo/milestone/1"
+        })
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout=mock_response)
+
+            result = await mcp_server_with_github._handle_gh_create_milestone(
+                title="Sprint 1",
+                description="First sprint",
+                due_date="2026-03-15"
+            )
+
+            assert result["milestone_number"] == 1
+            assert "milestone/1" in result["url"]
+
+            # Verify API was called correctly
+            call_args = mock_run.call_args[0][0]
+            assert "gh" in call_args
+            assert "api" in call_args
+            assert "milestones" in str(call_args)
+            assert "-X" in call_args
+            assert "POST" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_create_milestone_without_github(self, mcp_server):
+        """gh_create_milestone fails without GitHub config."""
+        result = await mcp_server._handle_gh_create_milestone(
+            title="Sprint 1"
+        )
+
+        assert "error" in result
+        assert "not configured" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_gh_list_milestones_mocked(self, mcp_server_with_github):
+        """gh_list_milestones parses JSONL output correctly."""
+        # gh api with --jq returns JSONL (one JSON object per line)
+        mock_output = '{"number": 1, "title": "Sprint 1", "open_issues": 5, "closed_issues": 3, "due_on": "2026-03-15", "html_url": "https://github.com/test/repo/milestone/1"}\n{"number": 2, "title": "Sprint 2", "open_issues": 10, "closed_issues": 0, "due_on": null, "html_url": "https://github.com/test/repo/milestone/2"}'
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout=mock_output)
+
+            result = await mcp_server_with_github._handle_gh_list_milestones()
+
+            assert len(result["milestones"]) == 2
+            assert result["milestones"][0]["number"] == 1
+            assert result["milestones"][0]["title"] == "Sprint 1"
+            assert result["milestones"][0]["open_issues"] == 5
+            assert result["milestones"][0]["closed_issues"] == 3
+            assert result["milestones"][1]["number"] == 2
+
+    @pytest.mark.asyncio
+    async def test_gh_list_milestones_empty(self, mcp_server_with_github):
+        """gh_list_milestones handles empty response."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="")
+
+            result = await mcp_server_with_github._handle_gh_list_milestones()
+
+            assert result["milestones"] == []
+
+    @pytest.mark.asyncio
+    async def test_gh_list_milestones_without_github(self, mcp_server):
+        """gh_list_milestones fails without GitHub config."""
+        result = await mcp_server._handle_gh_list_milestones()
+
+        assert "error" in result
+        assert "not configured" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_gh_create_issue_with_all_options(self, mcp_server_with_github):
+        """gh_create_issue handles all optional parameters."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=0,
+                stdout="https://github.com/test/repo/issues/99\n"
+            )
+
+            result = await mcp_server_with_github._handle_gh_create_issue(
+                title="Feature Request",
+                body="Add dark mode",
+                labels=["enhancement", "frontend"],
+                milestone="Sprint 2",
+                assignee="designer1"
+            )
+
+            assert result["issue_number"] == 99
+
+            # Verify all parameters were passed
+            call_args = mock_run.call_args[0][0]
+            assert "--label" in call_args
+            assert "--milestone" in call_args
+            assert "--assignee" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_list_issues_with_filters(self, mcp_server_with_github):
+        """gh_list_issues handles filter parameters."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="[]")
+
+            await mcp_server_with_github._handle_gh_list_issues(
+                labels=["bug", "critical"],
+                milestone="Sprint 1",
+                state="closed",
+                limit=50
+            )
+
+            call_args = mock_run.call_args[0][0]
+            # Each label gets its own --label flag
+            assert call_args.count("--label") == 2
+            assert "--milestone" in call_args
+            assert "--state" in call_args
+            assert "closed" in call_args
+            assert "--limit" in call_args
+            assert "50" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_list_issues_empty_response(self, mcp_server_with_github):
+        """gh_list_issues handles empty issue list."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="[]")
+
+            result = await mcp_server_with_github._handle_gh_list_issues()
+
+            assert result["issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_gh_list_issues_no_assignee(self, mcp_server_with_github):
+        """gh_list_issues handles issues with no assignee."""
+        mock_output = json.dumps([
+            {
+                "number": 1,
+                "title": "Unassigned Issue",
+                "labels": [],
+                "state": "open",
+                "assignees": [],
+                "url": "https://github.com/test/repo/issues/1"
+            }
+        ])
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout=mock_output)
+
+            result = await mcp_server_with_github._handle_gh_list_issues()
+
+            assert result["issues"][0]["assignee"] is None
+
+    @pytest.mark.asyncio
+    async def test_gh_cli_error_handling(self, mcp_server_with_github):
+        """GitHub tools handle CLI errors gracefully."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=1,
+                stdout="",
+                stderr="error: Could not resolve to a Repository"
+            )
+
+            result = await mcp_server_with_github._handle_gh_create_issue(
+                title="Test",
+                body="Test"
+            )
+
+            assert "error" in result
+            assert "Repository" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_gh_close_issue_with_comment(self, mcp_server_with_github):
+        """gh_close_issue passes comment to CLI."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="")
+
+            await mcp_server_with_github._handle_gh_close_issue(
+                issue_number=42,
+                comment="Resolved in PR #50"
+            )
+
+            call_args = mock_run.call_args[0][0]
+            assert "--comment" in call_args
+            assert "Resolved in PR #50" in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_close_issue_without_comment(self, mcp_server_with_github):
+        """gh_close_issue works without comment."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="")
+
+            await mcp_server_with_github._handle_gh_close_issue(
+                issue_number=42
+            )
+
+            call_args = mock_run.call_args[0][0]
+            assert "--comment" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_gh_close_issue_failure(self, mcp_server_with_github):
+        """gh_close_issue handles CLI failure."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=1,
+                stdout="",
+                stderr="issue not found"
+            )
+
+            result = await mcp_server_with_github._handle_gh_close_issue(
+                issue_number=9999
+            )
+
+            assert result["ok"] is False
+            assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_gh_create_issue_url_parsing(self, mcp_server_with_github):
+        """gh_create_issue correctly parses issue number from URL."""
+        with patch("subprocess.run") as mock_run:
+            # Test with trailing newline and whitespace
+            mock_run.return_value = Mock(
+                returncode=0,
+                stdout="https://github.com/org/repo/issues/123\n  "
+            )
+
+            result = await mcp_server_with_github._handle_gh_create_issue(
+                title="Test",
+                body="Test"
+            )
+
+            assert result["issue_number"] == 123
+
+    @pytest.mark.asyncio
+    async def test_gh_exception_handling(self, mcp_server_with_github):
+        """GitHub tools handle unexpected exceptions."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = OSError("Command not found")
+
+            result = await mcp_server_with_github._handle_gh_create_issue(
+                title="Test",
+                body="Test"
+            )
+
+            assert "error" in result
+            assert "Command not found" in result["error"]
+
 
 class TestMCPServerCreate:
     """Tests for MCP server instance creation."""

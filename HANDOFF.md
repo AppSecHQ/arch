@@ -2,8 +2,8 @@
 
 ## Current State
 
-**Steps Completed: 1-10 of 13**
-**Tests: 326 passing**
+**Steps Completed: 1-11 of 13**
+**Tests: 345 passing**
 **Last Commit:** (pending)
 
 ## Completed Components
@@ -20,26 +20,18 @@
 | 8 | `arch/orchestrator.py` | Config parsing, gates, startup/shutdown, lifecycle wiring | 43 |
 | 9 | `arch/dashboard.py` | Textual TUI with agents/activity/costs panels, escalations | 43 |
 | 10 | `personas/*.md` | archie, frontend, backend, qa, security, copywriter personas | - |
+| 11 | `tests/test_mcp_server.py` | GitHub tools integration tests (mocked gh CLI) | 22 |
 
-## Next Step: Step 11 — GitHub Tools (Integration Tests)
+## Next Step: Step 12 — CLI Entrypoint
 
-The GitHub tools are already implemented in `mcp_server.py`. Step 11 is to add integration tests that verify they work against a real GitHub repo:
-- `gh_create_issue`
-- `gh_list_issues`
-- `gh_close_issue`
-- `gh_update_issue`
-- `gh_add_comment`
-- `gh_create_milestone`
-- `gh_list_milestones`
+Build `arch.py` with commands:
+- `arch up [--config arch.yaml] [--keep-worktrees]` — Start ARCH and launch Archie
+- `arch down` — Gracefully shut down all agents and clean up
+- `arch status` — Show current state of a running ARCH session
+- `arch init [--name "My Project"] [--github owner/repo]` — Scaffold arch.yaml + personas/ + BRIEF.md
 
-Tests should verify:
-- Tool calls produce correct `gh` CLI commands
-- JSON output parsing works correctly
-- Error handling (missing `gh`, auth failures, API errors)
+## Remaining Steps (12-13)
 
-## Remaining Steps (11-13)
-
-11. **GitHub tools** — Integration tests (tools already implemented in MCP server)
 12. **CLI entrypoint** — `arch up/down/status/init` commands
 13. **Integration test** — End-to-end with real git repo
 
