@@ -81,3 +81,21 @@ Each item notes which step introduced it and which step it must be fixed by.
 - [ ] **Escalation answer not verified** — After calling `answer_escalation()`, the UI immediately clears the escalation state without checking the return value. If `answer_escalation()` returns `False` (decision not found), the user loses their input with no error feedback. Check return value and show error if needed.
 - [ ] **Timestamps display UTC, not local time** — `format_timestamp` shows UTC. For a local dev tool, local time is more natural. Consider `dt.astimezone().strftime(...)`.
 - [ ] **No queued escalation count** — Only the first pending decision is shown (`decisions[0]`). If multiple escalations queue up, user has no indication of how many remain. Add a "(1 of N)" indicator.
+
+---
+
+## Potential Enhancements (v2)
+
+### Skills Integration
+
+Consider adding Claude Code Skills support for extensibility and knowledge sharing across agents:
+
+- **Project-level skills** (`skills/*.md`) — Shared domain knowledge, coding conventions, workflow recipes
+- **Role augmentation** — Personas reference skills (e.g., frontend agent uses `/component-patterns`)
+- **Discovery mechanism** — MCP tool `get_available_skills` or inject into CLAUDE.md context
+- **Use cases:**
+  - `/testing` — How to write tests in this specific codebase
+  - `/commit-style`, `/pr-template` — Team conventions
+  - `/deploy`, `/release` — Multi-step workflow recipes
+
+Trade-off: Adds flexibility and composability but increases complexity vs. persona-only approach. Discuss with team before implementing.
