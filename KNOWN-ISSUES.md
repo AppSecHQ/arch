@@ -75,8 +75,9 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Dashboard (Step 9)
 
-- [x] **CRITICAL: No spawn_agent integration** — FIXED in Step 8 follow-up. Orchestrator now wires `on_spawn_agent`, `on_teardown_agent`, `on_request_merge`, `on_close_project` callbacks into MCP server.
-- [ ] **Refresh task never cancelled** — `_refresh_task` created via `asyncio.create_task` in `on_mount()` but never cancelled on exit. Could produce "task was destroyed but pending" warnings. Add `on_unmount()` with `self._refresh_task.cancel()`.
-- [ ] **No error handling in `_refresh_data`** — If any `StateStore` or `TokenTracker` call raises (e.g., corrupted state), the refresh crashes. Wrap body in try/except with logging.
+- [ ] **`_refresh_task` never cancelled** — The asyncio task created in `on_mount` runs an infinite `while True` loop and is never cancelled when the app exits. This can cause "Task was destroyed but it is pending" warnings. Add task cancellation in an `on_unmount` handler or use Textual's `set_interval` instead.
+- [ ] **No exception handling in `_refresh_loop`** — If `_refresh_data()` raises any exception (e.g., state store unavailable, widget query fails), the entire refresh loop crashes silently and the dashboard stops updating with no indication to the user. Wrap in try/except with logging.
+- [ ] **`_seen_message_ids` grows unbounded** — Messages are tracked forever in the `_seen_message_ids` set to avoid duplicates, but there's no pruning. In long-running sessions with many messages, this could consume significant memory. Consider capping the set size or using message timestamps.
+- [ ] **Escalation answer not verified** — After calling `answer_escalation()`, the UI immediately clears the escalation state without checking the return value. If `answer_escalation()` returns `False` (decision not found), the user loses their input with no error feedback. Check return value and show error if needed.
 - [ ] **Timestamps display UTC, not local time** — `format_timestamp` shows UTC. For a local dev tool, local time is more natural. Consider `dt.astimezone().strftime(...)`.
 - [ ] **No queued escalation count** — Only the first pending decision is shown (`decisions[0]`). If multiple escalations queue up, user has no indication of how many remain. Add a "(1 of N)" indicator.

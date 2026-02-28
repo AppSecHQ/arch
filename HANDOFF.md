@@ -2,7 +2,7 @@
 
 ## Current State
 
-**Steps Completed: 1-9 of 13**
+**Steps Completed: 1-10 of 13**
 **Tests: 326 passing**
 **Last Commit:** (pending)
 
@@ -19,26 +19,26 @@
 | 7 | `arch/session.py` | Unified Session/Container interface, ContainerizedSession | 16 |
 | 8 | `arch/orchestrator.py` | Config parsing, gates, startup/shutdown, lifecycle wiring | 43 |
 | 9 | `arch/dashboard.py` | Textual TUI with agents/activity/costs panels, escalations | 43 |
+| 10 | `personas/*.md` | archie, frontend, backend, qa, security, copywriter personas | - |
 
-## Next Step: Step 10 — Persona Files
+## Next Step: Step 11 — GitHub Tools (Integration Tests)
 
-Create default persona files in `personas/`:
-- `archie.md` - Lead Agent persona (includes instructions for get_project_context, spawn_agent, GitHub Scrum Master flow)
-- `frontend.md` - Frontend developer
-- `backend.md` - Backend developer
-- `qa.md` - QA/testing agent
-- `security.md` - Security auditor
-- `copywriter.md` - Documentation/copy agent
+The GitHub tools are already implemented in `mcp_server.py`. Step 11 is to add integration tests that verify they work against a real GitHub repo:
+- `gh_create_issue`
+- `gh_list_issues`
+- `gh_close_issue`
+- `gh_update_issue`
+- `gh_add_comment`
+- `gh_create_milestone`
+- `gh_list_milestones`
 
-Each persona should follow the CLAUDE.md style and include:
-- Role description
-- Expertise areas
-- Communication style
-- Workflow instructions
+Tests should verify:
+- Tool calls produce correct `gh` CLI commands
+- JSON output parsing works correctly
+- Error handling (missing `gh`, auth failures, API errors)
 
-## Remaining Steps (10-13)
+## Remaining Steps (11-13)
 
-10. **Persona files** — archie.md, frontend.md, backend.md, qa.md, security.md, copywriter.md
 11. **GitHub tools** — Integration tests (tools already implemented in MCP server)
 12. **CLI entrypoint** — `arch up/down/status/init` commands
 13. **Integration test** — End-to-end with real git repo
