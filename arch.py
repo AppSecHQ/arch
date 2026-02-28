@@ -26,7 +26,7 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -99,7 +99,7 @@ def remove_pid_file(state_dir: Path) -> None:
 async def cmd_up(args: argparse.Namespace) -> int:
     """Start ARCH and launch Archie."""
     from arch.orchestrator import Orchestrator
-    from arch.dashboard import run_dashboard
+    from arch.dashboard import run_dashboard_async
 
     config_path = Path(args.config)
 
@@ -132,12 +132,11 @@ async def cmd_up(args: argparse.Namespace) -> int:
             return 1
 
         # Run dashboard (this blocks until shutdown)
-        await run_dashboard(
+        await run_dashboard_async(
             state=orchestrator.state,
             token_tracker=orchestrator.token_tracker,
             mcp_server=orchestrator.mcp_server,
-            project_name=orchestrator.config.project.name,
-            token_budget_usd=orchestrator.config.settings.token_budget_usd,
+            budget=orchestrator.config.settings.token_budget_usd,
         )
 
         return 0
@@ -175,6 +174,46 @@ def cmd_down(args: argparse.Namespace) -> int:
     except OSError as e:
         print(f"Error sending signal: {e}")
         return 1
+
+
+# ============================================================================
+# arch send
+# ============================================================================
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    """Send a message to Archie via the message bus."""
+    from arch.state import StateStore
+
+    config_path = Path(args.config)
+    state_dir = get_state_dir(config_path)
+
+    if not state_dir.exists():
+        print("Error: ARCH state directory not found.")
+        print("Run 'arch up' first to start ARCH.")
+        return 1
+
+    # Check if ARCH is running
+    pid = read_pid_file(state_dir)
+    if not pid:
+        print("Warning: ARCH is not running. Message will be queued.")
+
+    # Load state and add message
+    state = StateStore(state_dir)
+    message = state.add_message(
+        from_agent="user",
+        to_agent="archie",
+        content=args.message
+    )
+
+    print(f"Message sent to Archie (id: {message['id']})")
+
+    if pid:
+        print("Archie will see this message on next get_messages call.")
+    else:
+        print("Start ARCH with 'arch up' - Archie will auto-resume to handle the message.")
+
+    return 0
 
 
 # ============================================================================
@@ -464,7 +503,7 @@ def setup_github(repo: str) -> None:
     # Create initial milestone
     print(f"  Creating initial milestone...")
     due_date = (datetime.now(timezone.utc).replace(day=1) +
-                __import__("datetime").timedelta(days=32)).strftime("%Y-%m-%d")
+                timedelta(days=32)).strftime("%Y-%m-%d")
 
     cmd = [
         "gh", "api", f"repos/{repo}/milestones",
@@ -504,11 +543,13 @@ Commands:
   up      Start ARCH and launch Archie
   down    Gracefully shut down all agents
   status  Show current state of running session
+  send    Send a message to Archie
   init    Scaffold a new ARCH project
 
 Examples:
   arch init --name "My App" --github myorg/myapp
   arch up
+  arch send "Please review the test results"
   arch status
   arch down
 """
@@ -532,6 +573,18 @@ Examples:
     # arch down
     down_parser = subparsers.add_parser("down", help="Gracefully shut down")
     down_parser.add_argument(
+        "--config", "-c",
+        default=DEFAULT_CONFIG,
+        help=f"Path to config file (default: {DEFAULT_CONFIG})"
+    )
+
+    # arch send
+    send_parser = subparsers.add_parser("send", help="Send a message to Archie")
+    send_parser.add_argument(
+        "message",
+        help="Message to send to Archie"
+    )
+    send_parser.add_argument(
         "--config", "-c",
         default=DEFAULT_CONFIG,
         help=f"Path to config file (default: {DEFAULT_CONFIG})"
@@ -571,6 +624,8 @@ Examples:
         return asyncio.run(cmd_up(args))
     elif args.command == "down":
         return cmd_down(args)
+    elif args.command == "send":
+        return cmd_send(args)
     elif args.command == "status":
         return cmd_status(args)
     elif args.command == "init":

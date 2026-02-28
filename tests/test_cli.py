@@ -27,6 +27,7 @@ remove_pid_file = arch_cli.remove_pid_file
 cmd_init = arch_cli.cmd_init
 cmd_status = arch_cli.cmd_status
 cmd_down = arch_cli.cmd_down
+cmd_send = arch_cli.cmd_send
 main = arch_cli.main
 DEFAULT_ARCH_YAML = arch_cli.DEFAULT_ARCH_YAML
 DEFAULT_BRIEF_MD = arch_cli.DEFAULT_BRIEF_MD
@@ -357,6 +358,117 @@ class TestCmdDown:
 
         # Cleanup
         remove_pid_file(state_dir)
+
+
+class TestCmdSend:
+    """Tests for arch send command (Issue #2)."""
+
+    def test_send_message_arch_running(self, tmp_path, capsys):
+        """send queues message when ARCH is running."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # Create PID file (simulate running ARCH)
+        write_pid_file(state_dir)
+
+        # Create minimal state files
+        (state_dir / "agents.json").write_text("{}")
+        (state_dir / "messages.json").write_text("[]")
+
+        config_path = tmp_path / "arch.yaml"
+        config_path.write_text(yaml.dump({
+            "settings": {"state_dir": str(state_dir)}
+        }))
+
+        args = MagicMock()
+        args.config = str(config_path)
+        args.message = "Please review the test results"
+
+        result = cmd_send(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Message sent" in captured.out
+        assert "Archie will see this message" in captured.out
+
+        # Verify message was added
+        messages = json.loads((state_dir / "messages.json").read_text())
+        assert len(messages) == 1
+        assert messages[0]["from"] == "user"
+        assert messages[0]["to"] == "archie"
+        assert messages[0]["content"] == "Please review the test results"
+
+        # Cleanup
+        remove_pid_file(state_dir)
+
+    def test_send_message_arch_not_running(self, tmp_path, capsys):
+        """send queues message with warning when ARCH not running."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # No PID file (ARCH not running)
+        (state_dir / "agents.json").write_text("{}")
+        (state_dir / "messages.json").write_text("[]")
+
+        config_path = tmp_path / "arch.yaml"
+        config_path.write_text(yaml.dump({
+            "settings": {"state_dir": str(state_dir)}
+        }))
+
+        args = MagicMock()
+        args.config = str(config_path)
+        args.message = "Hello Archie"
+
+        result = cmd_send(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out
+        assert "not running" in captured.out
+        assert "Message sent" in captured.out
+        assert "auto-resume" in captured.out.lower()
+
+        # Verify message was still added
+        messages = json.loads((state_dir / "messages.json").read_text())
+        assert len(messages) == 1
+        assert messages[0]["content"] == "Hello Archie"
+
+    def test_send_message_no_state_dir(self, tmp_path, capsys):
+        """send fails when state directory doesn't exist."""
+        config_path = tmp_path / "arch.yaml"
+        config_path.write_text(yaml.dump({
+            "settings": {"state_dir": str(tmp_path / "nonexistent")}
+        }))
+
+        args = MagicMock()
+        args.config = str(config_path)
+        args.message = "Hello"
+
+        result = cmd_send(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.out
+        assert "arch up" in captured.out.lower()
+
+    def test_main_send(self, tmp_path, capsys):
+        """main send command works."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "agents.json").write_text("{}")
+        (state_dir / "messages.json").write_text("[]")
+
+        config_path = tmp_path / "arch.yaml"
+        config_path.write_text(yaml.dump({
+            "settings": {"state_dir": str(state_dir)}
+        }))
+
+        with patch("sys.argv", ["arch", "send", "Test message", "--config", str(config_path)]):
+            result = main()
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Message sent" in captured.out
 
 
 class TestMain:

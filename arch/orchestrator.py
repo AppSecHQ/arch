@@ -17,6 +17,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -381,6 +382,7 @@ class Orchestrator:
         self._shutdown_requested = False
         self._archie_session: Optional[AnySession] = None
         self._archie_restart_count = 0
+        self._archie_last_exit_time: Optional[float] = None
         self._github_enabled = False
 
         # Agent instance tracking: role -> count of active instances
@@ -553,6 +555,46 @@ class Orchestrator:
             # Check if Archie needs restart
             if self._archie_session and not self._archie_session.is_running:
                 await self._handle_archie_exit()
+
+            # Auto-resume: if Archie is not running and has unread messages, resume
+            await self._check_auto_resume()
+
+    async def _check_auto_resume(self) -> None:
+        """
+        Check if Archie should be auto-resumed due to unread messages.
+
+        Conditions:
+        - Archie is not running (exited gracefully or crashed)
+        - Cooldown period (10s) has passed since last exit
+        - There are unread messages for Archie
+        - Haven't exceeded restart limits
+        """
+        # Skip if Archie is running or shutdown requested
+        if self._shutdown_requested:
+            return
+        if self._archie_session and self._archie_session.is_running:
+            return
+
+        # Skip if no exit time recorded (Archie never ran)
+        if self._archie_last_exit_time is None:
+            return
+
+        # Skip if within cooldown period (10 seconds)
+        cooldown_seconds = 10
+        if time.time() - self._archie_last_exit_time < cooldown_seconds:
+            return
+
+        # Skip if exceeded restart limits
+        if self._archie_restart_count > 1:
+            return
+
+        # Check for unread messages
+        if not self.state.has_unread_messages_for("archie"):
+            return
+
+        # Resume Archie
+        logger.info("Auto-resuming Archie due to unread messages")
+        await self._resume_archie_for_messages()
 
     def _verify_git_repo(self) -> bool:
         """Verify the git repository is accessible."""
@@ -1064,6 +1106,9 @@ class Orchestrator:
 
     async def _handle_archie_exit(self) -> None:
         """Handle unexpected Archie exit."""
+        # Record exit time for auto-resume cooldown
+        self._archie_last_exit_time = time.time()
+
         if self._shutdown_requested:
             return
 
@@ -1109,6 +1154,48 @@ class Orchestrator:
             logger.error("No session ID available for Archie restart")
             print("\n❌ Cannot restart Archie (no session ID). Shutting down.")
             self._shutdown_requested = True
+
+    async def _resume_archie_for_messages(self) -> None:
+        """
+        Resume Archie to handle unread messages.
+
+        Called by auto-resume logic when messages arrive while Archie is idle.
+        """
+        self._archie_restart_count += 1
+
+        session_id = self._archie_session.session_id if self._archie_session else None
+        worktree_path = self.worktree_manager.get_worktree_path("archie")
+
+        if not worktree_path:
+            logger.error("Cannot resume Archie: worktree not found")
+            return
+
+        config = AgentConfig(
+            agent_id="archie",
+            role="lead",
+            model=self.config.archie.model,
+            worktree=str(worktree_path),
+            sandboxed=False,
+            skip_permissions=False,
+        )
+
+        # Resume with a prompt about unread messages
+        prompt = "You have unread messages. Call get_messages and take action."
+
+        if session_id:
+            self._archie_session = await self.session_manager.spawn(
+                config,
+                prompt,
+                resume_session_id=session_id,
+            )
+        else:
+            # No session to resume, spawn fresh
+            self._archie_session = await self.session_manager.spawn(config, prompt)
+
+        if self._archie_session:
+            logger.info("Archie resumed for message handling")
+        else:
+            logger.error("Failed to resume Archie for messages")
 
     def _print_cost_summary(self) -> None:
         """Print cost summary to stdout."""

@@ -385,6 +385,39 @@ class TestStateStoreMessages:
         assert messages[0]["content"] == "Third"
 
 
+class TestStateStoreUnreadMessages:
+    """Tests for has_unread_messages_for (Issue #2)."""
+
+    def test_has_unread_messages_true(self, state_store):
+        """has_unread_messages_for returns True when unread messages exist."""
+        state_store.add_message("user", "archie", "Please check this")
+
+        assert state_store.has_unread_messages_for("archie") is True
+
+    def test_has_unread_messages_false_no_messages(self, state_store):
+        """has_unread_messages_for returns False with no messages."""
+        assert state_store.has_unread_messages_for("archie") is False
+
+    def test_has_unread_messages_false_all_read(self, state_store):
+        """has_unread_messages_for returns False when all messages are read."""
+        state_store.add_message("user", "archie", "Please check this")
+        state_store.get_messages("archie", mark_read=True)
+
+        assert state_store.has_unread_messages_for("archie") is False
+
+    def test_has_unread_messages_includes_broadcast(self, state_store):
+        """has_unread_messages_for includes broadcast messages."""
+        state_store.add_message("user", "broadcast", "Everyone check this")
+
+        assert state_store.has_unread_messages_for("archie") is True
+
+    def test_has_unread_messages_ignores_other_recipients(self, state_store):
+        """has_unread_messages_for ignores messages to other agents."""
+        state_store.add_message("archie", "frontend-1", "Do this task")
+
+        assert state_store.has_unread_messages_for("archie") is False
+
+
 class TestStateStoreDecisions:
     """Tests for user decision operations."""
 

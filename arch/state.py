@@ -322,6 +322,22 @@ class StateStore:
         with self._lock:
             return [dict(m) for m in self._state["messages"]]
 
+    def has_unread_messages_for(self, agent_id: str) -> bool:
+        """
+        Check if an agent has unread messages.
+
+        Args:
+            agent_id: Agent ID to check for unread messages.
+
+        Returns:
+            True if there are unread messages addressed to this agent.
+        """
+        with self._lock:
+            for msg in self._state["messages"]:
+                if (msg["to"] == agent_id or msg["to"] == "broadcast") and not msg["read"]:
+                    return True
+            return False
+
     # --- User Decision Operations ---
 
     def add_pending_decision(
