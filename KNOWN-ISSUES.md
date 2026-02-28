@@ -86,16 +86,6 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Potential Enhancements (v2)
 
-### Skills Integration
+### Skills Integration — [#3](https://github.com/AppSecHQ/arch/issues/3)
 
-Consider adding Claude Code Skills support for extensibility and knowledge sharing across agents:
-
-- **Project-level skills** (`skills/*.md`) — Shared domain knowledge, coding conventions, workflow recipes
-- **Role augmentation** — Personas reference skills (e.g., frontend agent uses `/component-patterns`)
-- **Discovery mechanism** — MCP tool `get_available_skills` or inject into CLAUDE.md context
-- **Use cases:**
-  - `/testing` — How to write tests in this specific codebase
-  - `/commit-style`, `/pr-template` — Team conventions
-  - `/deploy`, `/release` — Multi-step workflow recipes
-
-Trade-off: Adds flexibility and composability but increases complexity vs. persona-only approach. Discuss with team before implementing.
+Add Claude Code Skills as a composable knowledge layer on top of personas. Personas define role identity ("who you are"); Skills define project conventions ("how we do things here"). Agents already inherit repo-level skills via worktrees — this enhancement adds role-specific skill mapping via `arch.yaml` and explicit injection at spawn time.
