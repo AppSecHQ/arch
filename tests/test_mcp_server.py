@@ -25,7 +25,7 @@ class TestToolDefinitions:
     def test_worker_tools_defined(self):
         """Worker tools are defined correctly."""
         tool_names = {t.name for t in WORKER_TOOLS}
-        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion"}
+        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion", "save_progress"}
 
     def test_archie_tools_defined(self):
         """Archie-only tools are defined correctly."""
@@ -204,6 +204,86 @@ class TestWorkerTools:
         # Message sent to Archie
         messages, _ = mcp_server.state.get_messages("archie")
         assert any("Navbar built" in m["content"] for m in messages)
+
+
+class TestSaveProgressTool:
+    """Tests for save_progress tool (Step 11.5)."""
+
+    @pytest.mark.asyncio
+    async def test_save_progress_stores_context(self, mcp_server):
+        """save_progress stores context in agent record."""
+        mcp_server.state.register_agent("frontend-1", "frontend", "/wt")
+
+        result = await mcp_server._handle_save_progress(
+            agent_id="frontend-1",
+            files_modified=["src/Nav.tsx", "src/Nav.test.tsx"],
+            progress="NavBar component complete, tests passing",
+            next_steps="Wire up routing integration",
+            blockers=None,
+            decisions=["Used React Router v6 over v5"]
+        )
+
+        assert result["ok"] is True
+
+        # Verify context stored
+        agent = mcp_server.state.get_agent("frontend-1")
+        assert agent["context"]["files_modified"] == ["src/Nav.tsx", "src/Nav.test.tsx"]
+        assert agent["context"]["progress"] == "NavBar component complete, tests passing"
+        assert agent["context"]["next_steps"] == "Wire up routing integration"
+        assert agent["context"]["decisions"] == ["Used React Router v6 over v5"]
+
+    @pytest.mark.asyncio
+    async def test_save_progress_with_blockers(self, mcp_server):
+        """save_progress handles blockers field."""
+        mcp_server.state.register_agent("frontend-1", "frontend", "/wt")
+
+        result = await mcp_server._handle_save_progress(
+            agent_id="frontend-1",
+            files_modified=["src/Nav.tsx"],
+            progress="NavBar started",
+            next_steps="Need API endpoint",
+            blockers="Waiting for backend API to be ready"
+        )
+
+        assert result["ok"] is True
+        agent = mcp_server.state.get_agent("frontend-1")
+        assert agent["context"]["blockers"] == "Waiting for backend API to be ready"
+
+    @pytest.mark.asyncio
+    async def test_save_progress_returns_false_for_unknown_agent(self, mcp_server):
+        """save_progress returns false for unknown agent."""
+        result = await mcp_server._handle_save_progress(
+            agent_id="unknown-agent",
+            files_modified=["src/foo.tsx"],
+            progress="Some progress",
+            next_steps="Some steps"
+        )
+
+        assert result["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_save_progress_available_to_all_agents(self, mcp_server):
+        """save_progress tool is accessible to worker agents."""
+        tools = mcp_server._get_tools_for_agent("frontend-1")
+        tool_names = {t.name for t in tools}
+        assert "save_progress" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_save_progress_via_tool_call(self, mcp_server):
+        """save_progress works via _handle_tool_call dispatch."""
+        mcp_server.state.register_agent("frontend-1", "frontend", "/wt")
+
+        result = await mcp_server._handle_tool_call(
+            agent_id="frontend-1",
+            tool_name="save_progress",
+            arguments={
+                "files_modified": ["src/file.tsx"],
+                "progress": "Done",
+                "next_steps": "Deploy"
+            }
+        )
+
+        assert result["ok"] is True
 
 
 class TestArchieOnlyTools:

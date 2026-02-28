@@ -157,6 +157,79 @@ class TestWorktreeClaudeMd:
                 assignment="Task"
             )
 
+    def test_write_claude_md_with_session_state(self, worktree_manager):
+        """write_claude_md injects session state section (Step 11.5)."""
+        worktree_manager.create("resumed-agent")
+
+        session_state = {
+            "progress": "NavBar component complete, tests passing",
+            "files_modified": ["src/Nav.tsx", "src/Nav.test.tsx"],
+            "next_steps": "Wire up routing integration",
+            "blockers": None,
+            "decisions": ["Used React Router v6 over v5"]
+        }
+
+        path = worktree_manager.write_claude_md(
+            agent_id="resumed-agent",
+            persona_content="# Test Agent\n\nYou are a test agent.",
+            project_name="Test Project",
+            project_description="A test",
+            assignment="Build feature",
+            session_state=session_state
+        )
+
+        content = path.read_text()
+
+        # Check Session State section is present
+        assert "## Session State (from previous session)" in content
+        assert "NavBar component complete, tests passing" in content
+        assert "src/Nav.tsx, src/Nav.test.tsx" in content
+        assert "Wire up routing integration" in content
+        assert "Used React Router v6 over v5" in content
+        # Blockers is None, so shouldn't appear
+        assert "Blockers:" not in content
+
+    def test_write_claude_md_without_session_state(self, worktree_manager):
+        """write_claude_md omits session state section when not provided."""
+        worktree_manager.create("fresh-agent")
+
+        path = worktree_manager.write_claude_md(
+            agent_id="fresh-agent",
+            persona_content="# Test Agent\n\nYou are a test agent.",
+            project_name="Test Project",
+            project_description="A test",
+            assignment="Build feature"
+        )
+
+        content = path.read_text()
+
+        # Session State section should NOT be present
+        assert "## Session State" not in content
+
+    def test_write_claude_md_session_state_with_blockers(self, worktree_manager):
+        """write_claude_md includes blockers when present."""
+        worktree_manager.create("blocked-agent")
+
+        session_state = {
+            "progress": "Started navbar",
+            "files_modified": ["src/Nav.tsx"],
+            "next_steps": "Need API endpoint",
+            "blockers": "Waiting for backend API",
+            "decisions": []
+        }
+
+        path = worktree_manager.write_claude_md(
+            agent_id="blocked-agent",
+            persona_content="# Test",
+            project_name="Test",
+            project_description="Test",
+            assignment="Build",
+            session_state=session_state
+        )
+
+        content = path.read_text()
+        assert "Waiting for backend API" in content
+
 
 class TestWorktreeRemove:
     """Tests for worktree removal."""

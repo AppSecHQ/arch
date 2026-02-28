@@ -2,8 +2,8 @@
 
 ## Current State
 
-**Steps Completed: 1-11 of 13**
-**Tests: 345 passing**
+**Steps Completed: 1-11.5 of 13**
+**Tests: 361 passing**
 **Last Commit:** (pending)
 
 ## Completed Components
@@ -21,6 +21,7 @@
 | 9 | `arch/dashboard.py` | Textual TUI with agents/activity/costs panels, escalations | 43 |
 | 10 | `personas/*.md` | archie, frontend, backend, qa, security, copywriter personas | - |
 | 11 | `tests/test_mcp_server.py` | GitHub tools integration tests (mocked gh CLI) | 22 |
+| 11.5 | `arch/*.py` | Agent state persistence: context field, save_progress tool, CLAUDE.md injection | 16 |
 
 ## Next Step: Step 12 — CLI Entrypoint
 
@@ -30,67 +31,12 @@ Build `arch.py` with commands:
 - `arch status` — Show current state of a running ARCH session
 - `arch init [--name "My Project"] [--github owner/repo]` — Scaffold arch.yaml + personas/ + BRIEF.md
 
-## Remaining Steps (11.5-13)
+## Remaining Steps (12-13)
 
-11.5. **Agent state persistence** — Per-agent structured context for session continuity
 12. **CLI entrypoint** — `arch up/down/status/init` commands
 13. **Integration test** — End-to-end with real git repo
 
 ---
-
-## Step 11.5 — Agent State Persistence
-
-**Motivation:** When an agent's context window fills and needs a fresh session, project-level BRIEF.md isn't enough. Each agent needs structured state that survives restarts. See [#1](https://github.com/AppSecHQ/arch/issues/1) for the full discussion.
-
-**What to build:**
-
-### 1. StateStore: Add `context` field to agent records
-
-Extend `update_agent()` to accept an optional `context` dict:
-```python
-state.update_agent("frontend-1", context={
-    "files_modified": ["src/Nav.tsx", "src/Nav.test.tsx"],
-    "progress": "NavBar component complete, tests passing",
-    "next_steps": "Wire up routing integration",
-    "blockers": None,
-    "decisions": ["Used React Router v6 over v5"]
-})
-```
-
-The `context` field persists to `agents.json` alongside existing fields.
-
-### 2. MCP Server: Add `save_progress` tool (available to ALL agents)
-
-```
-save_progress
-  params:
-    files_modified: [string]
-    progress: string
-    next_steps: string
-    blockers: string?
-    decisions: [string]?
-  returns: { ok: bool }
-```
-
-Implementation: calls `state.update_agent(agent_id, context={...})`.
-
-### 3. Orchestrator: Inject context into CLAUDE.md on resume/restart
-
-When writing an agent's CLAUDE.md (in `_handle_spawn_agent` or on resume), check if the agent has a persisted `context` field. If so, append a `## Session State` section:
-
-```markdown
-## Session State (from previous session)
-- **Progress:** NavBar component complete, tests passing
-- **Files modified:** src/Nav.tsx, src/Nav.test.tsx
-- **Next steps:** Wire up routing integration
-- **Decisions:** Used React Router v6 over v5
-```
-
-### 4. Tests
-
-- StateStore: `update_agent` with context, persistence round-trip
-- MCP Server: `save_progress` tool handler
-- Orchestrator: CLAUDE.md injection includes session state when context exists
 
 ## Key Architecture
 

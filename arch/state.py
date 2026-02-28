@@ -187,7 +187,9 @@ class StateStore:
 
         Args:
             agent_id: Agent to update
-            **updates: Fields to update (status, task, session_id, pid, etc.)
+            **updates: Fields to update (status, task, session_id, pid, context, etc.)
+                       The `context` field stores structured session state for continuity
+                       across restarts. See save_progress MCP tool.
 
         Returns:
             Updated agent record, or None if not found.
@@ -208,6 +210,12 @@ class StateStore:
             # Handle nested usage updates
             if "usage" in updates:
                 agent["usage"].update(updates.pop("usage"))
+
+            # Handle nested context updates (merge rather than replace)
+            if "context" in updates:
+                if "context" not in agent or agent["context"] is None:
+                    agent["context"] = {}
+                agent["context"].update(updates.pop("context"))
 
             agent.update(updates)
             self._flush()

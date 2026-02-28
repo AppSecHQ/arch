@@ -689,6 +689,75 @@ class TestAgentLifecycleHandlers:
         assert orchestrator_with_pool._agent_instance_counts.get("test-agent", 0) == 0
 
 
+class TestSessionStatePersistence:
+    """Tests for agent session state persistence (Step 11.5)."""
+
+    @pytest.mark.asyncio
+    async def test_archie_context_injected_on_restart(self, orchestrator, mock_all_gates):
+        """Session state is injected into Archie's CLAUDE.md when present."""
+        await orchestrator.startup()
+
+        # Simulate Archie having saved progress in a previous session
+        orchestrator.state.update_agent("archie", context={
+            "progress": "Sprint planning complete",
+            "files_modified": ["BRIEF.md"],
+            "next_steps": "Spawn frontend agent",
+            "decisions": ["Using React for frontend"]
+        })
+
+        # Re-create Archie's worktree (simulating restart)
+        orchestrator.worktree_manager.remove.reset_mock()
+        orchestrator.worktree_manager.write_claude_md.reset_mock()
+
+        await orchestrator._create_archie_worktree()
+
+        # Verify write_claude_md was called with session_state
+        orchestrator.worktree_manager.write_claude_md.assert_called_once()
+        call_kwargs = orchestrator.worktree_manager.write_claude_md.call_args.kwargs
+        assert call_kwargs["session_state"] == {
+            "progress": "Sprint planning complete",
+            "files_modified": ["BRIEF.md"],
+            "next_steps": "Spawn frontend agent",
+            "decisions": ["Using React for frontend"]
+        }
+
+    @pytest.mark.asyncio
+    async def test_archie_no_context_no_session_state(self, orchestrator, mock_all_gates):
+        """CLAUDE.md has no Session State section when no context exists."""
+        await orchestrator.startup()
+
+        # Verify write_claude_md was called without session_state (or with None)
+        call_kwargs = orchestrator.worktree_manager.write_claude_md.call_args.kwargs
+        assert call_kwargs.get("session_state") is None
+
+    @pytest.mark.asyncio
+    async def test_worker_tools_include_save_progress(self, orchestrator_with_pool, mock_all_gates):
+        """Worker agents have save_progress in their tool list."""
+        await orchestrator_with_pool.startup()
+
+        result = await orchestrator_with_pool._handle_spawn_agent(
+            role="test-agent",
+            assignment="Build feature"
+        )
+
+        # Verify write_claude_md was called with save_progress in tools
+        # (The second call should be for the spawned agent)
+        calls = orchestrator_with_pool.worktree_manager.write_claude_md.call_args_list
+        # Find the call for the spawned agent (not archie)
+        agent_call = [c for c in calls if c.kwargs.get("agent_id", "").startswith("test-agent")]
+        assert len(agent_call) == 1
+        assert "save_progress" in agent_call[0].kwargs["available_tools"]
+
+    @pytest.mark.asyncio
+    async def test_archie_tools_include_save_progress(self, orchestrator, mock_all_gates):
+        """Archie has save_progress in tool list."""
+        await orchestrator.startup()
+
+        # Verify write_claude_md was called with save_progress for archie
+        call_kwargs = orchestrator.worktree_manager.write_claude_md.call_args.kwargs
+        assert "save_progress" in call_kwargs["available_tools"]
+
+
 # ============================================================================
 # Helper Functions and Fixtures
 # ============================================================================

@@ -102,6 +102,38 @@ WORKER_TOOLS = [
             "required": ["summary", "artifacts"]
         }
     ),
+    Tool(
+        name="save_progress",
+        description="Persist structured session state for continuity across context compactions and restarts. Call periodically during long tasks and before signaling completion.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "files_modified": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "files created or changed this session"
+                },
+                "progress": {
+                    "type": "string",
+                    "description": "summary of work completed so far"
+                },
+                "next_steps": {
+                    "type": "string",
+                    "description": "what remains to be done"
+                },
+                "blockers": {
+                    "type": "string",
+                    "description": "current blockers, if any"
+                },
+                "decisions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "architectural/scope decisions made this session"
+                }
+            },
+            "required": ["files_modified", "progress", "next_steps"]
+        }
+    ),
 ]
 
 # Tools available ONLY to Archie
@@ -479,6 +511,33 @@ class MCPServer:
         )
 
         return {"ok": True}
+
+    async def _handle_save_progress(
+        self,
+        agent_id: str,
+        files_modified: list[str],
+        progress: str,
+        next_steps: str,
+        blockers: Optional[str] = None,
+        decisions: Optional[list[str]] = None
+    ) -> dict[str, Any]:
+        """
+        Handle save_progress tool.
+
+        Persists structured session state to the agent's context field.
+        On agent restart, this context is injected into CLAUDE.md as a
+        "## Session State" section for continuity.
+        """
+        context = {
+            "files_modified": files_modified,
+            "progress": progress,
+            "next_steps": next_steps,
+            "blockers": blockers,
+            "decisions": decisions or [],
+        }
+
+        result = self.state.update_agent(agent_id, context=context)
+        return {"ok": result is not None}
 
     async def _handle_spawn_agent(
         self,
@@ -973,6 +1032,8 @@ class MCPServer:
             return await self._handle_update_status(agent_id, **arguments)
         elif tool_name == "report_completion":
             return await self._handle_report_completion(agent_id, **arguments)
+        elif tool_name == "save_progress":
+            return await self._handle_save_progress(agent_id, **arguments)
 
         # Archie-only tools
         elif tool_name == "spawn_agent":

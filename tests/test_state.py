@@ -230,6 +230,72 @@ class TestStateStoreAgents:
         assert state_store.remove_agent("unknown") is False
 
 
+class TestStateStoreAgentContext:
+    """Tests for agent context persistence (Step 11.5)."""
+
+    def test_update_agent_with_context(self, state_store):
+        """update_agent stores context dict."""
+        state_store.register_agent("test-1", "test", "/wt")
+
+        context = {
+            "files_modified": ["src/Nav.tsx", "src/Nav.test.tsx"],
+            "progress": "NavBar component complete",
+            "next_steps": "Wire up routing",
+            "blockers": None,
+            "decisions": ["Used React Router v6"]
+        }
+
+        updated = state_store.update_agent("test-1", context=context)
+
+        assert updated["context"] == context
+        assert updated["context"]["progress"] == "NavBar component complete"
+        assert updated["context"]["files_modified"] == ["src/Nav.tsx", "src/Nav.test.tsx"]
+
+    def test_update_agent_context_merges(self, state_store):
+        """update_agent merges context updates instead of replacing."""
+        state_store.register_agent("test-1", "test", "/wt")
+
+        # First update
+        state_store.update_agent("test-1", context={
+            "files_modified": ["src/Nav.tsx"],
+            "progress": "Started NavBar"
+        })
+
+        # Second update - should merge
+        updated = state_store.update_agent("test-1", context={
+            "files_modified": ["src/Nav.tsx", "src/Nav.test.tsx"],
+            "progress": "NavBar complete, tests added"
+        })
+
+        assert updated["context"]["files_modified"] == ["src/Nav.tsx", "src/Nav.test.tsx"]
+        assert updated["context"]["progress"] == "NavBar complete, tests added"
+
+    def test_context_persists_to_json(self, state_store, state_dir):
+        """Context persists to agents.json file."""
+        state_store.register_agent("test-1", "test", "/wt")
+
+        context = {
+            "progress": "Feature complete",
+            "next_steps": "Run tests"
+        }
+        state_store.update_agent("test-1", context=context)
+
+        # Load from fresh store
+        fresh_store = StateStore(state_dir)
+        agent = fresh_store.get_agent("test-1")
+
+        assert agent["context"]["progress"] == "Feature complete"
+        assert agent["context"]["next_steps"] == "Run tests"
+
+    def test_context_initially_absent(self, state_store):
+        """New agents don't have context field."""
+        state_store.register_agent("test-1", "test", "/wt")
+        agent = state_store.get_agent("test-1")
+
+        # Context shouldn't exist yet
+        assert "context" not in agent or agent.get("context") is None
+
+
 class TestStateStoreMessages:
     """Tests for message operations."""
 

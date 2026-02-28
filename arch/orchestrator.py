@@ -699,6 +699,13 @@ class Orchestrator:
             logger.warning(f"Archie persona not found at {persona_path}, using default")
             persona_content = "# Archie - Lead Agent\n\nYou are Archie, the lead agent."
 
+        # Check for persisted session state (from previous run)
+        session_state = None
+        existing_archie = self.state.get_agent("archie")
+        if existing_archie and existing_archie.get("context"):
+            session_state = existing_archie["context"]
+            logger.info("Injecting session state from previous Archie session")
+
         # Write CLAUDE.md with injected context
         self.worktree_manager.write_claude_md(
             agent_id="archie",
@@ -708,12 +715,13 @@ class Orchestrator:
             project_description=self.config.project.description,
             active_agents={},  # No other agents yet
             available_tools=[
-                "send_message", "get_messages", "update_status", "report_completion",
+                "send_message", "get_messages", "update_status", "save_progress", "report_completion",
                 "spawn_agent", "teardown_agent", "list_agents", "escalate_to_user",
                 "request_merge", "get_project_context", "close_project", "update_brief",
             ] + (["gh_create_issue", "gh_list_issues", "gh_close_issue", "gh_update_issue",
                   "gh_add_comment", "gh_create_milestone", "gh_list_milestones"]
                  if self._github_enabled else []),
+            session_state=session_state,
         )
 
         logger.info(f"Archie worktree created at {worktree_path}")
@@ -867,7 +875,7 @@ class Orchestrator:
                 persona_content = f"# {role}\n\nYou are a {role} agent."
 
             # Build available tools list (worker tools only)
-            available_tools = ["send_message", "get_messages", "update_status", "report_completion"]
+            available_tools = ["send_message", "get_messages", "update_status", "save_progress", "report_completion"]
 
             # Write CLAUDE.md
             full_assignment = assignment

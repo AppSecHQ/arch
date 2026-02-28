@@ -118,7 +118,8 @@ class WorktreeManager:
         project_description: str,
         assignment: str,
         active_agents: Optional[list[tuple[str, str]]] = None,
-        available_tools: Optional[list[str]] = None
+        available_tools: Optional[list[str]] = None,
+        session_state: Optional[dict] = None
     ) -> Path:
         """
         Write CLAUDE.md to an agent's worktree with injected context.
@@ -131,6 +132,8 @@ class WorktreeManager:
             assignment: Task description for this agent.
             active_agents: List of (agent_id, role) tuples for active team members.
             available_tools: List of available MCP tool names.
+            session_state: Optional persisted context from previous session
+                          (progress, files_modified, next_steps, blockers, decisions).
 
         Returns:
             Path to the written CLAUDE.md file.
@@ -155,6 +158,23 @@ class WorktreeManager:
         else:
             tools_str = "send_message, get_messages, update_status, report_completion"
 
+        # Build session state section if present
+        session_state_section = ""
+        if session_state:
+            session_state_section = "\n## Session State (from previous session)\n"
+            if session_state.get("progress"):
+                session_state_section += f"- **Progress:** {session_state['progress']}\n"
+            if session_state.get("files_modified"):
+                files = ", ".join(session_state["files_modified"])
+                session_state_section += f"- **Files modified:** {files}\n"
+            if session_state.get("next_steps"):
+                session_state_section += f"- **Next steps:** {session_state['next_steps']}\n"
+            if session_state.get("blockers"):
+                session_state_section += f"- **Blockers:** {session_state['blockers']}\n"
+            if session_state.get("decisions"):
+                decisions = "; ".join(session_state["decisions"])
+                session_state_section += f"- **Decisions:** {decisions}\n"
+
         # Build injected header
         header = f"""<!-- INJECTED BY ARCH — DO NOT EDIT BELOW THIS LINE -->
 ## ARCH Harness Context
@@ -165,7 +185,7 @@ class WorktreeManager:
 - **Active team members:** {agents_str}
 - **Your assignment:** {assignment}
 <!-- END ARCH CONTEXT -->
-
+{session_state_section}
 ---
 
 {persona_content}"""
