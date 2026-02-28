@@ -1,0 +1,700 @@
+"""
+ARCH Dashboard
+
+Textual TUI dashboard for monitoring and interacting with ARCH.
+Displays agent status, activity log, costs, and handles user escalations.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.reactive import reactive
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Footer,
+    Header,
+    Input,
+    ProgressBar,
+    RichLog,
+    Static,
+)
+from rich.text import Text
+
+if TYPE_CHECKING:
+    from arch.mcp_server import MCPServer
+    from arch.state import StateStore
+    from arch.token_tracker import TokenTracker
+
+# Refresh interval in seconds
+REFRESH_INTERVAL = 2.0
+
+# Status indicator symbols and colors
+# Note: Rich uses "bright_black" for gray color
+STATUS_INDICATORS = {
+    "working": ("●", "green"),
+    "blocked": ("●", "yellow"),
+    "waiting_review": ("●", "yellow"),
+    "idle": ("○", "bright_black"),
+    "done": ("✓", "green"),
+    "error": ("✗", "red"),
+}
+
+
+def format_runtime(start_time: Optional[str]) -> str:
+    """Format runtime duration as HH:MM:SS."""
+    if not start_time:
+        return "00:00:00"
+
+    try:
+        start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - start
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    except (ValueError, TypeError):
+        return "00:00:00"
+
+
+def format_timestamp(ts: Optional[str]) -> str:
+    """Format ISO timestamp as HH:MM."""
+    if not ts:
+        return "--:--"
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.strftime("%H:%M")
+    except (ValueError, TypeError, AttributeError):
+        return "--:--"
+
+
+def format_agent_display(agent: dict[str, Any]) -> Text:
+    """Format an agent for display."""
+    status = agent.get("status", "idle")
+    symbol, color = STATUS_INDICATORS.get(status, ("○", "bright_black"))
+
+    agent_id = agent.get("id", "unknown")
+    task = agent.get("task", "")
+
+    # Add tags
+    tags = []
+    if agent.get("sandboxed"):
+        tags.append("[c]")
+    if agent.get("skip_permissions"):
+        tags.append("[!]")
+
+    tag_str = "".join(tags)
+
+    # Build rich text
+    text = Text()
+    text.append(symbol, style=color)
+    if tag_str:
+        text.append(tag_str, style="cyan")
+    text.append(f" {agent_id}")
+
+    # Add task on second line if present
+    if task:
+        display_task = task[:20] + "..." if len(task) > 20 else task
+        text.append(f"\n  {display_task}", style="dim")
+
+    return text
+
+
+class AgentsPanel(Static):
+    """Panel showing all active agents."""
+
+    def compose(self) -> ComposeResult:
+        yield Static("AGENTS", classes="panel-title")
+        yield Static("", id="agents-content")
+
+    def update_agents(self, agents: list[dict[str, Any]]) -> None:
+        """Update the agents display."""
+        content = self.query_one("#agents-content", Static)
+        if not agents:
+            content.update("No agents")
+            return
+
+        text = Text()
+        for i, agent in enumerate(agents):
+            if i > 0:
+                text.append("\n")
+            text.append_text(format_agent_display(agent))
+
+        content.update(text)
+
+
+class ActivityPanel(Static):
+    """Panel showing activity log (messages)."""
+
+    def compose(self) -> ComposeResult:
+        yield Static("ACTIVITY LOG", classes="panel-title")
+        yield RichLog(id="activity-log", highlight=True, markup=True)
+
+    def add_message(self, message: dict[str, Any]) -> None:
+        """Add a message to the activity log."""
+        log = self.query_one("#activity-log", RichLog)
+
+        ts = format_timestamp(message.get("timestamp", ""))
+        sender = message.get("from", "?")
+        content = message.get("content", "")
+
+        # Truncate long content
+        if len(content) > 50:
+            content = content[:47] + "..."
+
+        # Color blocked messages differently
+        if "BLOCKED" in content.upper():
+            log.write(f"[yellow]{ts} {sender:10} {content}[/yellow]")
+        else:
+            log.write(f"{ts} {sender:10} {content}")
+
+
+class CostsPanel(Static):
+    """Panel showing per-agent costs and budget."""
+
+    budget: Optional[float] = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("COSTS", classes="panel-title")
+        yield Static("", id="costs-content")
+        yield ProgressBar(id="costs-bar", total=100, show_eta=False)
+
+    def update_costs(self, costs: dict[str, dict[str, Any]]) -> None:
+        """Update the costs display."""
+        content = self.query_one("#costs-content", Static)
+        bar = self.query_one("#costs-bar", ProgressBar)
+
+        lines = []
+        total = 0.0
+
+        for agent_id, usage in costs.items():
+            cost = usage.get("cost_usd", 0.0)
+            total += cost
+            lines.append(f"{agent_id:12} ${cost:.2f}")
+
+        lines.append("─" * 14)
+        lines.append(f"{'Total':12} ${total:.2f}")
+
+        if self.budget:
+            lines.append(f"{'Budget':12} ${self.budget:.2f}")
+            pct = min(100, (total / self.budget) * 100) if self.budget > 0 else 0
+            bar.update(progress=pct)
+
+            # Update bar style based on percentage
+            bar.remove_class("danger", "warning", "normal")
+            if pct >= 90:
+                bar.add_class("danger")
+            elif pct >= 75:
+                bar.add_class("warning")
+            else:
+                bar.add_class("normal")
+        else:
+            bar.update(progress=0)
+
+        content.update("\n".join(lines))
+
+
+class EscalationPanel(Static):
+    """Panel for displaying and answering escalations."""
+
+    question: reactive[str] = reactive("")
+    options: reactive[list[str]] = reactive([])
+    decision_id: reactive[Optional[str]] = reactive(None)
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="escalation-question")
+        yield Input(placeholder="Type your answer...", id="escalation-input", disabled=True)
+
+    def watch_question(self, question: str) -> None:
+        """Update the question display."""
+        q_widget = self.query_one("#escalation-question", Static)
+        input_widget = self.query_one("#escalation-input", Input)
+
+        if question:
+            display = f"⚠ ARCHIE ASKS: {question}"
+            if self.options:
+                display += f" [{'/'.join(self.options)}]"
+            q_widget.update(display)
+            input_widget.disabled = False
+            input_widget.focus()
+        else:
+            q_widget.update("")
+            input_widget.disabled = True
+            input_widget.value = ""
+
+
+class HelpScreen(ModalScreen[None]):
+    """Modal screen showing keyboard shortcuts."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("?", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("ARCH Dashboard Help", classes="help-title"),
+            Static(""),
+            Static("Keyboard Shortcuts:", classes="help-section"),
+            Static("  q         Quit (graceful shutdown)"),
+            Static("  ?         Show this help"),
+            Static("  l         View Archie's conversation log"),
+            Static("  1-9       View agent conversation logs"),
+            Static("  m         View message bus log"),
+            Static("  Escape    Close modals"),
+            Static(""),
+            Static("Press ? or Escape to close", classes="help-footer"),
+            id="help-container",
+        )
+
+
+class MessageLogScreen(ModalScreen[None]):
+    """Modal screen showing full message log."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, messages: list[dict[str, Any]], title: str = "Messages") -> None:
+        super().__init__()
+        self.messages = messages
+        self.title_text = title
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(self.title_text, classes="modal-title"),
+            RichLog(id="full-log", highlight=True),
+            Static("Press Escape to close", classes="modal-footer"),
+            id="log-container",
+        )
+
+    def on_mount(self) -> None:
+        """Populate the log when mounted."""
+        log = self.query_one("#full-log", RichLog)
+        for msg in self.messages:
+            ts = format_timestamp(msg.get("timestamp", ""))
+            sender = msg.get("from", "?")
+            recipient = msg.get("to", "?")
+            content = msg.get("content", "")
+            log.write(f"[{ts}] {sender} → {recipient}: {content}")
+
+
+class Dashboard(App):
+    """
+    Main ARCH Dashboard application.
+
+    Displays agent status, activity log, costs, and handles user escalations.
+    """
+
+    CSS = """
+    /* Main layout */
+    #main-container {
+        layout: horizontal;
+        height: 1fr;
+    }
+
+    #agents-panel {
+        width: 22;
+        height: 100%;
+        border: solid green;
+        padding: 0 1;
+    }
+
+    #activity-panel {
+        width: 1fr;
+        height: 100%;
+        border: solid blue;
+        padding: 0 1;
+    }
+
+    #costs-panel {
+        width: 20;
+        height: 100%;
+        border: solid yellow;
+        padding: 0 1;
+    }
+
+    #escalation-panel {
+        height: 3;
+        border: solid red;
+        padding: 0 1;
+    }
+
+    .panel-title {
+        text-style: bold;
+        color: white;
+        height: 1;
+    }
+
+    #agents-content {
+        height: auto;
+    }
+
+    #costs-content {
+        height: auto;
+    }
+
+    #activity-log {
+        height: 1fr;
+    }
+
+    /* Progress bar colors */
+    ProgressBar.normal Bar {
+        color: green;
+    }
+
+    ProgressBar.warning Bar {
+        color: yellow;
+    }
+
+    ProgressBar.danger Bar {
+        color: red;
+    }
+
+    #costs-bar {
+        height: 1;
+        margin-top: 1;
+    }
+
+    /* Help screen */
+    HelpScreen {
+        align: center middle;
+    }
+
+    #help-container {
+        width: 50;
+        height: auto;
+        padding: 1 2;
+        border: solid green;
+        background: $surface;
+    }
+
+    .help-title {
+        text-style: bold;
+        text-align: center;
+    }
+
+    .help-section {
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    .help-footer {
+        text-align: center;
+        margin-top: 1;
+        color: $text-muted;
+    }
+
+    /* Log screen */
+    MessageLogScreen {
+        align: center middle;
+    }
+
+    #log-container {
+        width: 80%;
+        height: 80%;
+        padding: 1;
+        border: solid blue;
+        background: $surface;
+    }
+
+    .modal-title {
+        text-style: bold;
+        text-align: center;
+        height: 1;
+    }
+
+    .modal-footer {
+        text-align: center;
+        color: $text-muted;
+        height: 1;
+    }
+
+    #full-log {
+        height: 1fr;
+        border: solid $primary;
+    }
+
+    /* Input styling */
+    #escalation-input {
+        height: 1;
+    }
+
+    #escalation-question {
+        height: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("?", "help", "Help"),
+        Binding("l", "view_archie_log", "Archie Log"),
+        Binding("m", "view_messages", "Messages"),
+        Binding("1", "view_agent_1", "Agent 1", show=False),
+        Binding("2", "view_agent_2", "Agent 2", show=False),
+        Binding("3", "view_agent_3", "Agent 3", show=False),
+        Binding("4", "view_agent_4", "Agent 4", show=False),
+        Binding("5", "view_agent_5", "Agent 5", show=False),
+        Binding("6", "view_agent_6", "Agent 6", show=False),
+        Binding("7", "view_agent_7", "Agent 7", show=False),
+        Binding("8", "view_agent_8", "Agent 8", show=False),
+        Binding("9", "view_agent_9", "Agent 9", show=False),
+    ]
+
+    project_name: reactive[str] = reactive("ARCH")
+    runtime: reactive[str] = reactive("00:00:00")
+
+    def __init__(
+        self,
+        state: "StateStore",
+        token_tracker: "TokenTracker",
+        mcp_server: Optional["MCPServer"] = None,
+        budget: Optional[float] = None,
+        on_quit: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """
+        Initialize the dashboard.
+
+        Args:
+            state: StateStore instance for reading state.
+            token_tracker: TokenTracker instance for cost data.
+            mcp_server: MCPServer instance for answering escalations.
+            budget: Optional token budget in USD.
+            on_quit: Callback when user quits.
+        """
+        super().__init__()
+        self.state = state
+        self.token_tracker = token_tracker
+        self.mcp_server = mcp_server
+        self.budget = budget
+        self.on_quit_callback = on_quit
+
+        # Track seen messages to avoid duplicates
+        self._seen_message_ids: set[str] = set()
+
+        # Track agents for number key shortcuts
+        self._agent_list: list[str] = []
+
+        # Refresh task
+        self._refresh_task: Optional[asyncio.Task] = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Horizontal(
+            AgentsPanel(id="agents-panel"),
+            ActivityPanel(id="activity-panel"),
+            CostsPanel(id="costs-panel"),
+            id="main-container",
+        )
+        yield EscalationPanel(id="escalation-panel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Start the refresh loop when mounted."""
+        # Set initial project name from state
+        project = self.state.get_project()
+        self.project_name = project.get("name", "ARCH")
+        self.title = f"ARCH · {self.project_name}"
+
+        # Set budget on costs panel
+        costs_panel = self.query_one("#costs-panel", CostsPanel)
+        costs_panel.budget = self.budget
+
+        # Start refresh loop
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+        # Initial refresh
+        self._refresh_data()
+
+    async def _refresh_loop(self) -> None:
+        """Periodically refresh dashboard data."""
+        while True:
+            await asyncio.sleep(REFRESH_INTERVAL)
+            self._refresh_data()
+
+    def _refresh_data(self) -> None:
+        """Refresh all dashboard data from state."""
+        # Update runtime
+        project = self.state.get_project()
+        self.runtime = format_runtime(project.get("started_at"))
+        self.sub_title = f"Runtime: {self.runtime}"
+
+        # Update agents
+        agents = self.state.list_agents()
+        agents_panel = self.query_one("#agents-panel", AgentsPanel)
+        agents_panel.update_agents(agents)
+
+        # Track agent IDs for number shortcuts (excluding archie)
+        self._agent_list = [a["id"] for a in agents if a["id"] != "archie"]
+
+        # Update costs
+        costs = self.token_tracker.get_all_usage()
+        costs_panel = self.query_one("#costs-panel", CostsPanel)
+        costs_panel.update_costs(costs)
+
+        # Update activity log with new messages
+        messages = self.state.get_all_messages()
+        activity_panel = self.query_one("#activity-panel", ActivityPanel)
+
+        for msg in messages:
+            msg_id = msg.get("id")
+            if msg_id and msg_id not in self._seen_message_ids:
+                self._seen_message_ids.add(msg_id)
+                activity_panel.add_message(msg)
+
+        # Check for pending decisions
+        decisions = self.state.get_pending_decisions()
+        escalation_panel = self.query_one("#escalation-panel", EscalationPanel)
+
+        if decisions:
+            decision = decisions[0]  # Handle one at a time
+            escalation_panel.decision_id = decision.get("id")
+            escalation_panel.question = decision.get("question", "")
+            escalation_panel.options = decision.get("options", [])
+        else:
+            escalation_panel.decision_id = None
+            escalation_panel.question = ""
+            escalation_panel.options = []
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle escalation input submission."""
+        escalation_panel = self.query_one("#escalation-panel", EscalationPanel)
+        decision_id = escalation_panel.decision_id
+
+        if decision_id and event.value:
+            # Answer the escalation
+            if self.mcp_server:
+                self.mcp_server.answer_escalation(decision_id, event.value)
+
+            # Clear the input and question
+            event.input.value = ""
+            escalation_panel.decision_id = None
+            escalation_panel.question = ""
+            escalation_panel.options = []
+
+            # Log the response
+            activity_panel = self.query_one("#activity-panel", ActivityPanel)
+            activity_panel.add_message({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "from": "user",
+                "content": f"Answered: {event.value}",
+            })
+
+    def action_quit(self) -> None:
+        """Handle quit action."""
+        if self.on_quit_callback:
+            self.on_quit_callback()
+        self.exit()
+
+    def action_help(self) -> None:
+        """Show help screen."""
+        self.push_screen(HelpScreen())
+
+    def action_view_archie_log(self) -> None:
+        """View Archie's message log."""
+        messages = [
+            m for m in self.state.get_all_messages()
+            if m.get("from") == "archie" or m.get("to") == "archie"
+        ]
+        self.push_screen(MessageLogScreen(messages, "Archie Messages"))
+
+    def action_view_messages(self) -> None:
+        """View full message log."""
+        messages = self.state.get_all_messages()
+        self.push_screen(MessageLogScreen(messages, "All Messages"))
+
+    def _view_agent_log(self, index: int) -> None:
+        """View an agent's message log by index."""
+        if index < len(self._agent_list):
+            agent_id = self._agent_list[index]
+            messages = [
+                m for m in self.state.get_all_messages()
+                if m.get("from") == agent_id or m.get("to") == agent_id
+            ]
+            self.push_screen(MessageLogScreen(messages, f"{agent_id} Messages"))
+
+    def action_view_agent_1(self) -> None:
+        self._view_agent_log(0)
+
+    def action_view_agent_2(self) -> None:
+        self._view_agent_log(1)
+
+    def action_view_agent_3(self) -> None:
+        self._view_agent_log(2)
+
+    def action_view_agent_4(self) -> None:
+        self._view_agent_log(3)
+
+    def action_view_agent_5(self) -> None:
+        self._view_agent_log(4)
+
+    def action_view_agent_6(self) -> None:
+        self._view_agent_log(5)
+
+    def action_view_agent_7(self) -> None:
+        self._view_agent_log(6)
+
+    def action_view_agent_8(self) -> None:
+        self._view_agent_log(7)
+
+    def action_view_agent_9(self) -> None:
+        self._view_agent_log(8)
+
+
+def run_dashboard(
+    state: "StateStore",
+    token_tracker: "TokenTracker",
+    mcp_server: Optional["MCPServer"] = None,
+    budget: Optional[float] = None,
+    on_quit: Optional[Callable[[], None]] = None,
+) -> None:
+    """
+    Run the dashboard (blocking).
+
+    Args:
+        state: StateStore instance.
+        token_tracker: TokenTracker instance.
+        mcp_server: MCPServer instance for escalation handling.
+        budget: Optional token budget in USD.
+        on_quit: Callback when user quits.
+    """
+    app = Dashboard(
+        state=state,
+        token_tracker=token_tracker,
+        mcp_server=mcp_server,
+        budget=budget,
+        on_quit=on_quit,
+    )
+    app.run()
+
+
+async def run_dashboard_async(
+    state: "StateStore",
+    token_tracker: "TokenTracker",
+    mcp_server: Optional["MCPServer"] = None,
+    budget: Optional[float] = None,
+    on_quit: Optional[Callable[[], None]] = None,
+) -> None:
+    """
+    Run the dashboard asynchronously.
+
+    Args:
+        state: StateStore instance.
+        token_tracker: TokenTracker instance.
+        mcp_server: MCPServer instance for escalation handling.
+        budget: Optional token budget in USD.
+        on_quit: Callback when user quits.
+    """
+    app = Dashboard(
+        state=state,
+        token_tracker=token_tracker,
+        mcp_server=mcp_server,
+        budget=budget,
+        on_quit=on_quit,
+    )
+    await app.run_async()

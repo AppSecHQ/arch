@@ -2,9 +2,9 @@
 
 ## Current State
 
-**Steps Completed: 1-8 of 13**
-**Tests: 283 passing**
-**Last Commit:** `2aa2d9e` Wire agent lifecycle tools to orchestrator (Step 8 follow-up)
+**Steps Completed: 1-9 of 13**
+**Tests: 326 passing**
+**Last Commit:** (pending)
 
 ## Completed Components
 
@@ -18,12 +18,36 @@
 | 6 | `arch/container.py` | Docker spawn/stop, volume mounts, Dockerfile | 40 |
 | 7 | `arch/session.py` | Unified Session/Container interface, ContainerizedSession | 16 |
 | 8 | `arch/orchestrator.py` | Config parsing, gates, startup/shutdown, lifecycle wiring | 43 |
+| 9 | `arch/dashboard.py` | Textual TUI with agents/activity/costs panels, escalations | 43 |
 
-## Next Step: Step 9 — Dashboard
+## Next Step: Step 10 — Persona Files
 
-Build `arch/dashboard.py` using Textual TUI library.
+Create default persona files in `personas/`:
+- `archie.md` - Lead Agent persona (includes instructions for get_project_context, spawn_agent, GitHub Scrum Master flow)
+- `frontend.md` - Frontend developer
+- `backend.md` - Backend developer
+- `qa.md` - QA/testing agent
+- `security.md` - Security auditor
+- `copywriter.md` - Documentation/copy agent
 
-### Layout (from spec)
+Each persona should follow the CLAUDE.md style and include:
+- Role description
+- Expertise areas
+- Communication style
+- Workflow instructions
+
+## Remaining Steps (10-13)
+
+10. **Persona files** — archie.md, frontend.md, backend.md, qa.md, security.md, copywriter.md
+11. **GitHub tools** — Integration tests (tools already implemented in MCP server)
+12. **CLI entrypoint** — `arch up/down/status/init` commands
+13. **Integration test** — End-to-end with real git repo
+
+## Key Architecture
+
+### Dashboard Features (Step 9)
+
+**Layout:**
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  ARCH  ·  ProjectName  ·  Runtime: 00:14:32      [q]uit  [?]help   │
@@ -43,44 +67,29 @@ Build `arch/dashboard.py` using Textual TUI library.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Status indicators
+**Status indicators:**
 - `●` green — working
 - `●` yellow — blocked/waiting_review
-- `○` grey — idle
+- `○` bright_black — idle
 - `✓` green — done
 - `✗` red — error
-- `[c]` — containerized (sandboxed)
-- `[!]` — skip_permissions enabled
+- `[c]` — containerized
+- `[!]` — skip_permissions
 
-### Key features
-1. **Agents panel**: Live status from `StateStore.list_agents()`
-2. **Activity log**: Messages from state, scrollable
-3. **Costs panel**: Per-agent costs from `TokenTracker`, budget progress bar
-4. **User input**: Bottom panel for `escalate_to_user` responses
-5. **Keyboard shortcuts**: q=quit, ?=help, l=Archie log, 1-9=agent logs, m=messages
+**Keyboard shortcuts:**
+- `q` — graceful shutdown
+- `?` — help overlay
+- `l` — Archie's log
+- `1-9` — agent logs
+- `m` — message bus
 
-### Integration points
-- `MCPServer.answer_escalation(decision_id, answer)` — called when user answers
-- `StateStore.get_pending_decisions()` — check for questions
-- `TokenTracker.get_all_usage()` — cost data
+**Integration:**
+- `StateStore.list_agents()` → agents panel
+- `StateStore.get_all_messages()` → activity log
+- `StateStore.get_pending_decisions()` → escalation panel
+- `TokenTracker.get_all_usage()` → costs panel
+- `MCPServer.answer_escalation()` → handles user input
 - 2-second refresh interval
-
-### Blocking pattern for escalations
-```python
-# In MCPServer._handle_escalate_to_user:
-event = asyncio.Event()
-self._pending_escalations[decision_id] = event
-await event.wait()  # Blocks until dashboard calls answer_escalation
-```
-
-## Remaining Steps (10-13)
-
-10. **Persona files** — archie.md, frontend.md, backend.md, qa.md, security.md, copywriter.md
-11. **GitHub tools** — Integration tests (tools already implemented in MCP server)
-12. **CLI entrypoint** — `arch up/down/status/init` commands
-13. **Integration test** — End-to-end with real git repo
-
-## Key Architecture
 
 ### Agent Lifecycle Flow
 ```
@@ -119,6 +128,7 @@ from arch.orchestrator import Orchestrator
 from arch.mcp_server import MCPServer
 from arch.session import SessionManager, ContainerizedSession
 from arch.state import StateStore
+from arch.dashboard import Dashboard, run_dashboard
 print('All modules ready')
 "
 ```
