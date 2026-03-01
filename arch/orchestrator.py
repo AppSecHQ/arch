@@ -816,7 +816,9 @@ class Orchestrator:
             sandboxed=False,
             skip_permissions=False,
             allowed_tools=archie_allowed_tools,
-            permission_prompt_tool=f"mcp__arch__handle_permission_request",
+            # NOTE: permission_prompt_tool disabled for MVP - MCP tool must be available
+            # before claude validates the flag, causing startup race condition.
+            # permission_prompt_tool=f"mcp__arch__handle_permission_request",
         )
 
         # Build initial prompt
@@ -992,7 +994,8 @@ class Orchestrator:
                 sandboxed=pool_entry.sandbox.enabled,
                 skip_permissions=actual_skip_permissions,
                 allowed_tools=agent_allowed_tools,
-                permission_prompt_tool=f"mcp__arch__handle_permission_request",
+                # NOTE: permission_prompt_tool disabled for MVP - see _spawn_archie comment
+                # permission_prompt_tool=f"mcp__arch__handle_permission_request",
                 container_image=pool_entry.sandbox.image,
                 container_memory_limit=pool_entry.sandbox.memory_limit,
                 container_cpus=pool_entry.sandbox.cpus,
