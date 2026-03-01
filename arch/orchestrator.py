@@ -44,22 +44,51 @@ DEFAULT_CONTAINER_IMAGE = "arch-agent:latest"
 DEFAULT_ARCHIE_PERSONA = "personas/archie.md"
 DEFAULT_SHUTDOWN_TIMEOUT = 30
 
-# Default allowed tools for all agents (safe file operations)
+# Default allowed tools for all agents
 # These map to --allowedTools CLI flags
 DEFAULT_ALLOWED_TOOLS_ALL = [
+    # File operations (also covered by --permission-mode acceptEdits, belt-and-suspenders)
     "Read",
     "Edit",
     "Write",
     "Glob",
     "Grep",
-    "Bash(git:*)",  # Git operations only
+    # Git operations
+    "Bash(git status)",
+    "Bash(git diff *)",
+    "Bash(git add *)",
+    "Bash(git commit *)",
+    "Bash(git log *)",
+    "Bash(git branch *)",
+    "Bash(git checkout *)",
+    # MCP tools available to all agents
+    "mcp__arch__send_message",
+    "mcp__arch__get_messages",
+    "mcp__arch__update_status",
+    "mcp__arch__save_progress",
+    "mcp__arch__report_completion",
 ]
 
 # Additional tools for Archie (lead agent coordination)
 DEFAULT_ALLOWED_TOOLS_ARCHIE = [
     *DEFAULT_ALLOWED_TOOLS_ALL,
-    "Bash(gh:*)",  # GitHub CLI for issue/PR management
-    "Task",  # Subagent spawning
+    "Bash(gh *)",  # GitHub CLI for issue/PR management
+    # Archie-only MCP tools
+    "mcp__arch__spawn_agent",
+    "mcp__arch__teardown_agent",
+    "mcp__arch__list_agents",
+    "mcp__arch__escalate_to_user",
+    "mcp__arch__request_merge",
+    "mcp__arch__get_project_context",
+    "mcp__arch__close_project",
+    "mcp__arch__update_brief",
+    "mcp__arch__gh_create_issue",
+    "mcp__arch__gh_list_issues",
+    "mcp__arch__gh_close_issue",
+    "mcp__arch__gh_update_issue",
+    "mcp__arch__gh_add_comment",
+    "mcp__arch__gh_create_milestone",
+    "mcp__arch__gh_list_milestones",
 ]
 
 
@@ -816,9 +845,7 @@ class Orchestrator:
             sandboxed=False,
             skip_permissions=False,
             allowed_tools=archie_allowed_tools,
-            # NOTE: permission_prompt_tool disabled for MVP - MCP tool must be available
-            # before claude validates the flag, causing startup race condition.
-            # permission_prompt_tool=f"mcp__arch__handle_permission_request",
+            permission_prompt_tool="mcp__arch__handle_permission_request",
         )
 
         # Build initial prompt
@@ -994,8 +1021,7 @@ class Orchestrator:
                 sandboxed=pool_entry.sandbox.enabled,
                 skip_permissions=actual_skip_permissions,
                 allowed_tools=agent_allowed_tools,
-                # NOTE: permission_prompt_tool disabled for MVP - see _spawn_archie comment
-                # permission_prompt_tool=f"mcp__arch__handle_permission_request",
+                permission_prompt_tool="mcp__arch__handle_permission_request",
                 container_image=pool_entry.sandbox.image,
                 container_memory_limit=pool_entry.sandbox.memory_limit,
                 container_cpus=pool_entry.sandbox.cpus,

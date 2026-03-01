@@ -46,7 +46,7 @@ class TestAgentConfig:
             worktree="/path/to/wt",
             sandboxed=True,
             skip_permissions=True,
-            allowed_tools=["Read", "Edit", "Bash(git:*)"],
+            allowed_tools=["Read", "Edit", "Bash(git *)"],
             permission_prompt_tool="mcp__arch__handle_permission_request",
             container_image="custom:latest",
             container_memory_limit="2g",
@@ -57,7 +57,7 @@ class TestAgentConfig:
         assert config.sandboxed is True
         assert config.skip_permissions is True
         assert config.container_memory_limit == "2g"
-        assert config.allowed_tools == ["Read", "Edit", "Bash(git:*)"]
+        assert config.allowed_tools == ["Read", "Edit", "Bash(git *)"]
         assert config.permission_prompt_tool == "mcp__arch__handle_permission_request"
 
 
@@ -174,7 +174,7 @@ class TestSession:
         config = AgentConfig(
             agent_id="perm-agent",
             role="test",
-            allowed_tools=["Read", "Edit", "Bash(git:*)"],
+            allowed_tools=["Read", "Edit", "Bash(git *)"],
         )
         session = Session(config, state, token_tracker, tmp_path, 3999)
 
@@ -188,7 +188,7 @@ class TestSession:
             assert "--allowedTools" in cmd
             assert "Read" in cmd
             assert "Edit" in cmd
-            assert "Bash(git:*)" in cmd
+            assert "Bash(git *)" in cmd
             # Should NOT have --dangerously-skip-permissions
             assert "--dangerously-skip-permissions" not in cmd
 

@@ -134,9 +134,14 @@ WORKER_TOOLS = [
             "required": ["files_modified", "progress", "next_steps"]
         }
     ),
+]
+
+# System tools — called by Claude CLI permission system, not by agents directly.
+# Not listed in any agent's tool catalog; dispatch handles them separately.
+SYSTEM_TOOLS = [
     Tool(
         name="handle_permission_request",
-        description="Request permission to use a tool not in the pre-approved list. BLOCKS until user responds.",
+        description="Handle permission prompt from Claude CLI. Called automatically when an agent requests a tool not in the pre-approved list. BLOCKS until user responds.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -459,6 +464,7 @@ class MCPServer:
         # Build tool lists
         self._worker_tool_names = {t.name for t in WORKER_TOOLS}
         self._archie_tool_names = self._worker_tool_names | {t.name for t in ARCHIE_ONLY_TOOLS}
+        self._system_tool_names = {t.name for t in SYSTEM_TOOLS}
 
         if self.github_repo:
             self._archie_tool_names |= {t.name for t in GITHUB_TOOLS}
@@ -468,7 +474,11 @@ class MCPServer:
         return agent_id == "archie"
 
     def _get_tools_for_agent(self, agent_id: str) -> list[Tool]:
-        """Get the list of tools available to an agent."""
+        """Get the list of tools available to an agent.
+
+        Note: SYSTEM_TOOLS are not listed here — they are not visible in agent
+        tool catalogs but are callable via dispatch (used by --permission-prompt-tool).
+        """
         if self._is_archie(agent_id):
             tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS
             if self.github_repo:
@@ -477,7 +487,13 @@ class MCPServer:
         return WORKER_TOOLS
 
     def _check_tool_access(self, agent_id: str, tool_name: str) -> bool:
-        """Check if an agent has access to a tool."""
+        """Check if an agent has access to a tool.
+
+        System tools (e.g., handle_permission_request) are callable by any agent
+        since they are invoked by Claude CLI's permission system, not by agents directly.
+        """
+        if tool_name in self._system_tool_names:
+            return True
         if self._is_archie(agent_id):
             return tool_name in self._archie_tool_names
         return tool_name in self._worker_tool_names

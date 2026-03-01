@@ -15,6 +15,7 @@ from arch.mcp_server import (
     WORKER_TOOLS,
     ARCHIE_ONLY_TOOLS,
     GITHUB_TOOLS,
+    SYSTEM_TOOLS,
 )
 from arch.state import StateStore
 
@@ -25,7 +26,12 @@ class TestToolDefinitions:
     def test_worker_tools_defined(self):
         """Worker tools are defined correctly."""
         tool_names = {t.name for t in WORKER_TOOLS}
-        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion", "save_progress", "handle_permission_request"}
+        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion", "save_progress"}
+
+    def test_system_tools_defined(self):
+        """System tools are defined correctly."""
+        tool_names = {t.name for t in SYSTEM_TOOLS}
+        assert tool_names == {"handle_permission_request"}
 
     def test_archie_tools_defined(self):
         """Archie-only tools are defined correctly."""
@@ -47,7 +53,7 @@ class TestToolDefinitions:
 
     def test_all_tools_have_schemas(self):
         """All tools have input schemas."""
-        all_tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS + GITHUB_TOOLS
+        all_tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS + GITHUB_TOOLS + SYSTEM_TOOLS
         for tool in all_tools:
             assert tool.inputSchema is not None
             assert tool.inputSchema.get("type") == "object"
@@ -123,6 +129,20 @@ class TestAccessControl:
         assert mcp_server._check_tool_access("archie", "send_message") is True
         assert mcp_server._check_tool_access("archie", "spawn_agent") is True
         assert mcp_server._check_tool_access("archie", "escalate_to_user") is True
+
+    def test_system_tools_accessible_by_all(self, mcp_server):
+        """System tools (e.g., handle_permission_request) callable by any agent."""
+        assert mcp_server._check_tool_access("frontend-1", "handle_permission_request") is True
+        assert mcp_server._check_tool_access("archie", "handle_permission_request") is True
+
+    def test_system_tools_not_in_agent_catalogs(self, mcp_server):
+        """System tools are NOT listed in agent tool catalogs."""
+        worker_tools = mcp_server._get_tools_for_agent("frontend-1")
+        archie_tools = mcp_server._get_tools_for_agent("archie")
+        worker_names = {t.name for t in worker_tools}
+        archie_names = {t.name for t in archie_tools}
+        assert "handle_permission_request" not in worker_names
+        assert "handle_permission_request" not in archie_names
 
 
 class TestWorkerTools:
