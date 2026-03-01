@@ -34,6 +34,8 @@ class TestAgentConfig:
         assert config.model == "claude-sonnet-4-6"
         assert config.sandboxed is False
         assert config.skip_permissions is False
+        assert config.allowed_tools == []
+        assert config.permission_prompt_tool is None
 
     def test_all_values(self):
         """AgentConfig accepts all parameters."""
@@ -44,6 +46,8 @@ class TestAgentConfig:
             worktree="/path/to/wt",
             sandboxed=True,
             skip_permissions=True,
+            allowed_tools=["Read", "Edit", "Bash(git:*)"],
+            permission_prompt_tool="mcp__arch__handle_permission_request",
             container_image="custom:latest",
             container_memory_limit="2g",
             container_cpus=1.5,
@@ -53,6 +57,8 @@ class TestAgentConfig:
         assert config.sandboxed is True
         assert config.skip_permissions is True
         assert config.container_memory_limit == "2g"
+        assert config.allowed_tools == ["Read", "Edit", "Bash(git:*)"]
+        assert config.permission_prompt_tool == "mcp__arch__handle_permission_request"
 
 
 class TestGenerateMCPConfig:
@@ -161,6 +167,81 @@ class TestSession:
         # Check audit log was created
         audit_path = tmp_path / "permissions_audit.log"
         assert audit_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_spawn_with_allowed_tools(self, state, token_tracker, tmp_path):
+        """spawn() adds --permission-mode acceptEdits and --allowedTools flags."""
+        config = AgentConfig(
+            agent_id="perm-agent",
+            role="test",
+            allowed_tools=["Read", "Edit", "Bash(git:*)"],
+        )
+        session = Session(config, state, token_tracker, tmp_path, 3999)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock:
+            mock.return_value = create_mock_process()
+            await session.spawn("Do work")
+
+            cmd = mock.call_args[0]
+            assert "--permission-mode" in cmd
+            assert "acceptEdits" in cmd
+            assert "--allowedTools" in cmd
+            assert "Read" in cmd
+            assert "Edit" in cmd
+            assert "Bash(git:*)" in cmd
+            # Should NOT have --dangerously-skip-permissions
+            assert "--dangerously-skip-permissions" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_spawn_with_permission_prompt_tool(self, state, token_tracker, tmp_path):
+        """spawn() adds --permission-prompt-tool flag when configured."""
+        config = AgentConfig(
+            agent_id="perm-agent",
+            role="test",
+            permission_prompt_tool="mcp__arch__handle_permission_request",
+        )
+        session = Session(config, state, token_tracker, tmp_path, 3999)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock:
+            mock.return_value = create_mock_process()
+            await session.spawn("Do work")
+
+            cmd = mock.call_args[0]
+            assert "--permission-prompt-tool" in cmd
+            assert "mcp__arch__handle_permission_request" in cmd
+
+    @pytest.mark.asyncio
+    async def test_skip_permissions_overrides_allowed_tools(self, state, token_tracker, tmp_path):
+        """skip_permissions=True uses --dangerously-skip-permissions, ignores allowed_tools."""
+        config = AgentConfig(
+            agent_id="skip-agent",
+            role="test",
+            skip_permissions=True,
+            allowed_tools=["Read", "Edit"],  # Should be ignored
+            permission_prompt_tool="mcp__arch__test",  # Should be ignored
+        )
+        session = Session(config, state, token_tracker, tmp_path, 3999)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock:
+            mock.return_value = create_mock_process()
+            await session.spawn("Do work")
+
+            cmd = mock.call_args[0]
+            assert "--dangerously-skip-permissions" in cmd
+            # Should NOT have permission-mode or allowedTools when skip_permissions is True
+            assert "--permission-mode" not in cmd
+            assert "--allowedTools" not in cmd
+            assert "--permission-prompt-tool" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_spawn_default_uses_accept_edits(self, session, mock_subprocess):
+        """spawn() uses --permission-mode acceptEdits by default (no skip_permissions)."""
+        await session.spawn("Build the navbar")
+
+        cmd = mock_subprocess.call_args[0]
+        assert "--permission-mode" in cmd
+        assert "acceptEdits" in cmd
+        assert "--dangerously-skip-permissions" not in cmd
 
     @pytest.mark.asyncio
     async def test_spawn_with_resume(self, session, mock_subprocess):

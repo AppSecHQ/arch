@@ -205,6 +205,7 @@ class EscalationPanel(Static):
     question: reactive[str] = reactive("")
     options: reactive[list[str]] = reactive([])
     decision_id: reactive[Optional[str]] = reactive(None)
+    is_permission_request: reactive[bool] = reactive(False)
 
     def compose(self) -> ComposeResult:
         yield Static("", id="escalation-question")
@@ -216,9 +217,17 @@ class EscalationPanel(Static):
         input_widget = self.query_one("#escalation-input", Input)
 
         if question:
-            display = f"⚠ ARCHIE ASKS: {question}"
-            if self.options:
-                display += f" [{'/'.join(self.options)}]"
+            # Check if this is a permission request
+            if self.is_permission_request:
+                display = f"🔐 PERMISSION REQUEST:\n{question}\n"
+                display += "[y]es once  [a]lways  [n]o"
+                input_widget.placeholder = "Type y, a, or n..."
+            else:
+                display = f"⚠ ARCHIE ASKS: {question}"
+                if self.options:
+                    display += f" [{'/'.join(self.options)}]"
+                input_widget.placeholder = "Type your answer..."
+
             q_widget.update(display)
             input_widget.disabled = False
             input_widget.focus()
@@ -226,6 +235,7 @@ class EscalationPanel(Static):
             q_widget.update("")
             input_widget.disabled = True
             input_widget.value = ""
+            input_widget.placeholder = "Type your answer..."
 
 
 class HelpScreen(ModalScreen[None]):
@@ -554,10 +564,12 @@ class Dashboard(App):
         if decisions:
             decision = decisions[0]  # Handle one at a time
             escalation_panel.decision_id = decision.get("id")
+            escalation_panel.is_permission_request = decision.get("type") == "permission_request"
             escalation_panel.question = decision.get("question", "")
             escalation_panel.options = decision.get("options", [])
         else:
             escalation_panel.decision_id = None
+            escalation_panel.is_permission_request = False
             escalation_panel.question = ""
             escalation_panel.options = []
 
@@ -567,13 +579,26 @@ class Dashboard(App):
         decision_id = escalation_panel.decision_id
 
         if decision_id and event.value:
+            answer = event.value
+
+            # For permission requests, expand short answers
+            if escalation_panel.is_permission_request:
+                answer_lower = answer.lower().strip()
+                if answer_lower in ("y", "yes"):
+                    answer = "yes (this time)"
+                elif answer_lower in ("a", "always"):
+                    answer = "always (this session)"
+                elif answer_lower in ("n", "no"):
+                    answer = "no"
+
             # Answer the escalation
             if self.mcp_server:
-                self.mcp_server.answer_escalation(decision_id, event.value)
+                self.mcp_server.answer_escalation(decision_id, answer)
 
             # Clear the input and question
             event.input.value = ""
             escalation_panel.decision_id = None
+            escalation_panel.is_permission_request = False
             escalation_panel.question = ""
             escalation_panel.options = []
 
@@ -582,7 +607,7 @@ class Dashboard(App):
             activity_panel.add_message({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "from": "user",
-                "content": f"Answered: {event.value}",
+                "content": f"Answered: {answer}",
             })
 
     def action_quit(self) -> None:

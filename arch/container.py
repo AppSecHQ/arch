@@ -193,6 +193,8 @@ class ContainerSession:
         mcp_config_path: Path,
         model: str = "claude-sonnet-4-6",
         skip_permissions: bool = False,
+        allowed_tools: Optional[list[str]] = None,
+        permission_prompt_tool: Optional[str] = None,
     ):
         """
         Initialize a container session.
@@ -204,6 +206,8 @@ class ContainerSession:
             mcp_config_path: Path to MCP config JSON.
             model: Claude model to use.
             skip_permissions: Whether to use --dangerously-skip-permissions.
+            allowed_tools: List of tools to allow via --allowedTools.
+            permission_prompt_tool: MCP tool for runtime permission requests.
         """
         self.agent_id = agent_id
         self.config = config
@@ -211,6 +215,8 @@ class ContainerSession:
         self.mcp_config_path = Path(mcp_config_path)
         self.model = model
         self.skip_permissions = skip_permissions
+        self.allowed_tools = allowed_tools or []
+        self.permission_prompt_tool = permission_prompt_tool
 
         self._process: Optional[asyncio.subprocess.Process] = None
         self._running = False
@@ -236,8 +242,21 @@ class ContainerSession:
             "--print",
         ]
 
+        # Add permission flags
         if self.skip_permissions:
             args.append("--dangerously-skip-permissions")
+        else:
+            # Use acceptEdits mode for safe file operations
+            args.extend(["--permission-mode", "acceptEdits"])
+
+            # Add allowed tools whitelist
+            if self.allowed_tools:
+                args.append("--allowedTools")
+                args.extend(self.allowed_tools)
+
+            # Add permission prompt tool for runtime approval
+            if self.permission_prompt_tool:
+                args.extend(["--permission-prompt-tool", self.permission_prompt_tool])
 
         if resume_session_id:
             args.extend(["--resume", resume_session_id])

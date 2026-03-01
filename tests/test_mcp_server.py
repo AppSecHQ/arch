@@ -25,7 +25,7 @@ class TestToolDefinitions:
     def test_worker_tools_defined(self):
         """Worker tools are defined correctly."""
         tool_names = {t.name for t in WORKER_TOOLS}
-        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion", "save_progress"}
+        assert tool_names == {"send_message", "get_messages", "update_status", "report_completion", "save_progress", "handle_permission_request"}
 
     def test_archie_tools_defined(self):
         """Archie-only tools are defined correctly."""
@@ -1002,3 +1002,156 @@ _Not started._
         port=3999,
         repo_path=repo_path
     )
+
+
+class TestRuntimeAllowed:
+    """Tests for runtime permission allowlist."""
+
+    def test_runtime_allowed_empty_by_default(self, mcp_server):
+        """Runtime allowlist is empty by default."""
+        assert mcp_server._runtime_allowed == {}
+
+    def test_check_runtime_allowed_false_when_empty(self, mcp_server):
+        """_check_runtime_allowed returns False when agent not in allowlist."""
+        assert mcp_server._check_runtime_allowed("agent-1", "Bash") is False
+
+    def test_add_runtime_allowed(self, mcp_server):
+        """add_runtime_allowed adds tool to agent's allowlist."""
+        mcp_server.add_runtime_allowed("agent-1", "Bash")
+
+        assert mcp_server._check_runtime_allowed("agent-1", "Bash") is True
+        assert mcp_server._check_runtime_allowed("agent-1", "Read") is False
+        assert mcp_server._check_runtime_allowed("agent-2", "Bash") is False
+
+    def test_add_multiple_tools(self, mcp_server):
+        """add_runtime_allowed can add multiple tools for same agent."""
+        mcp_server.add_runtime_allowed("agent-1", "Bash")
+        mcp_server.add_runtime_allowed("agent-1", "Read")
+        mcp_server.add_runtime_allowed("agent-1", "Edit")
+
+        assert mcp_server._check_runtime_allowed("agent-1", "Bash") is True
+        assert mcp_server._check_runtime_allowed("agent-1", "Read") is True
+        assert mcp_server._check_runtime_allowed("agent-1", "Edit") is True
+
+    def test_runtime_allowed_per_agent(self, mcp_server):
+        """Runtime allowlist is per-agent."""
+        mcp_server.add_runtime_allowed("agent-1", "Bash")
+        mcp_server.add_runtime_allowed("agent-2", "Read")
+
+        assert mcp_server._check_runtime_allowed("agent-1", "Bash") is True
+        assert mcp_server._check_runtime_allowed("agent-1", "Read") is False
+        assert mcp_server._check_runtime_allowed("agent-2", "Bash") is False
+        assert mcp_server._check_runtime_allowed("agent-2", "Read") is True
+
+
+class TestHandlePermissionRequest:
+    """Tests for handle_permission_request tool."""
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_from_runtime_allowed(self, mcp_server):
+        """handle_permission_request auto-approves if tool is in runtime allowlist."""
+        mcp_server.add_runtime_allowed("agent-1", "Bash")
+
+        result = await mcp_server._handle_permission_request(
+            agent_id="agent-1",
+            tool_name="Bash",
+            reason="Need to run git"
+        )
+
+        assert result["approved"] is True
+        assert result["source"] == "runtime_allowlist"
+
+    @pytest.mark.asyncio
+    async def test_creates_pending_decision(self, mcp_server):
+        """handle_permission_request creates a pending decision."""
+        # Start the request in a task (it will block)
+        async def make_request():
+            return await mcp_server._handle_permission_request(
+                agent_id="test-agent",
+                tool_name="Bash",
+                tool_args="git push",
+                reason="Need to push code"
+            )
+
+        task = asyncio.create_task(make_request())
+
+        # Give it time to create the decision
+        await asyncio.sleep(0.1)
+
+        # Check decision was created
+        decisions = mcp_server.state.get_pending_decisions()
+        assert len(decisions) == 1
+        assert "Bash" in decisions[0]["question"]
+        assert decisions[0]["type"] == "permission_request"
+        assert decisions[0]["agent_id"] == "test-agent"
+        assert decisions[0]["tool_name"] == "Bash"
+
+        # Answer the decision to unblock
+        mcp_server.answer_escalation(decisions[0]["id"], "yes")
+
+        result = await task
+        assert result["approved"] is True
+
+    @pytest.mark.asyncio
+    async def test_yes_response_approves(self, mcp_server):
+        """'yes' response approves permission once."""
+        async def make_request():
+            return await mcp_server._handle_permission_request(
+                agent_id="test-agent",
+                tool_name="Bash",
+                reason="Need bash"
+            )
+
+        task = asyncio.create_task(make_request())
+        await asyncio.sleep(0.1)
+
+        decisions = mcp_server.state.get_pending_decisions()
+        mcp_server.answer_escalation(decisions[0]["id"], "yes (this time)")
+
+        result = await task
+        assert result["approved"] is True
+        assert result["source"] == "user_once"
+        # Should NOT be added to runtime allowlist
+        assert mcp_server._check_runtime_allowed("test-agent", "Bash") is False
+
+    @pytest.mark.asyncio
+    async def test_always_response_adds_to_allowlist(self, mcp_server):
+        """'always' response approves and adds to runtime allowlist."""
+        async def make_request():
+            return await mcp_server._handle_permission_request(
+                agent_id="test-agent",
+                tool_name="Bash",
+                reason="Need bash"
+            )
+
+        task = asyncio.create_task(make_request())
+        await asyncio.sleep(0.1)
+
+        decisions = mcp_server.state.get_pending_decisions()
+        mcp_server.answer_escalation(decisions[0]["id"], "always (this session)")
+
+        result = await task
+        assert result["approved"] is True
+        assert result["source"] == "user_always"
+        # SHOULD be added to runtime allowlist
+        assert mcp_server._check_runtime_allowed("test-agent", "Bash") is True
+
+    @pytest.mark.asyncio
+    async def test_no_response_denies(self, mcp_server):
+        """'no' response denies permission."""
+        async def make_request():
+            return await mcp_server._handle_permission_request(
+                agent_id="test-agent",
+                tool_name="Bash",
+                reason="Need bash"
+            )
+
+        task = asyncio.create_task(make_request())
+        await asyncio.sleep(0.1)
+
+        decisions = mcp_server.state.get_pending_decisions()
+        mcp_server.answer_escalation(decisions[0]["id"], "no")
+
+        result = await task
+        assert result["approved"] is False
+        assert "denied" in result["reason"]

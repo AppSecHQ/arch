@@ -64,7 +64,18 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Orchestrator (Step 8)
 
-- [ ] **CRITICAL: Agents block on permission approval** — [#4](https://github.com/AppSecHQ/arch/issues/4). Agents spawned with `--print` block indefinitely waiting for tool permission approval (no TTY). Three-layer fix: `--permission-mode acceptEdits` + `--allowedTools` whitelist per role + `--permission-prompt-tool` for runtime delegation to dashboard. **Blocks all agent execution.**
+- [x] **CRITICAL: Agents block on permission approval** — FIXED ([#4](https://github.com/AppSecHQ/arch/issues/4)). Implemented three-layer permission system:
+  1. `--permission-mode acceptEdits` — auto-approves Read, Edit, Write, Glob, Grep
+  2. `--allowedTools` whitelist — DEFAULT_ALLOWED_TOOLS_ALL and DEFAULT_ALLOWED_TOOLS_ARCHIE constants, merged with user-configured `permissions.allowed_tools` from arch.yaml
+  3. `--permission-prompt-tool mcp__arch__handle_permission_request` — new MCP tool that blocks like escalate_to_user when agent requests unlisted tool
+
+  Runtime "always allow" also implemented:
+  - Dashboard shows [y]once [a]lways [n]o for permission requests
+  - "always" choice adds tool to in-memory `_runtime_allowed` dict (session-scoped)
+  - Subsequent requests for same tool auto-approve without prompting
+
+  Files modified: orchestrator.py, session.py, container.py, mcp_server.py, dashboard.py
+  Tests added: 14 new tests (437 total)
 
 - [ ] **`atexit` handler fires during tests** — "Emergency cleanup on exit" prints 8 times during test suite. The `atexit.register` in `_register_signal_handlers` is never unregistered. Add `atexit.unregister` in `_restore_signal_handlers` or guard the handler against test contexts.
 - [ ] **`_permission_gate` uses blocking `input()`** — `input()` blocks the async event loop. Works for CLI usage but prevents automated/headless startup. Consider `asyncio.to_thread(input)` or a callback pattern.

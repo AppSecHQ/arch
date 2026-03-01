@@ -37,6 +37,10 @@ class AgentConfig:
     sandboxed: bool = False
     skip_permissions: bool = False
 
+    # Permission settings
+    allowed_tools: list[str] = field(default_factory=list)
+    permission_prompt_tool: Optional[str] = None
+
     # Container settings (used by container.py)
     container_image: str = "arch-agent:latest"
     container_memory_limit: Optional[str] = None
@@ -205,14 +209,27 @@ class Session:
             "--print",
         ]
 
-        # Add skip permissions if configured
+        # Add permission flags
         if self.config.skip_permissions:
+            # Full bypass - use with caution
             cmd.append("--dangerously-skip-permissions")
             log_permissions_audit(
                 self.state_dir,
                 self.config.agent_id,
                 self.config.role
             )
+        else:
+            # Use acceptEdits mode for safe file operations
+            cmd.extend(["--permission-mode", "acceptEdits"])
+
+            # Add allowed tools whitelist
+            if self.config.allowed_tools:
+                cmd.append("--allowedTools")
+                cmd.extend(self.config.allowed_tools)
+
+            # Add permission prompt tool for runtime approval
+            if self.config.permission_prompt_tool:
+                cmd.extend(["--permission-prompt-tool", self.config.permission_prompt_tool])
 
         # Resume existing session or start new
         if resume_session_id:
@@ -525,6 +542,8 @@ class ContainerizedSession:
             mcp_config_path=mcp_config_path,
             model=self.config.model,
             skip_permissions=self.config.skip_permissions,
+            allowed_tools=self.config.allowed_tools,
+            permission_prompt_tool=self.config.permission_prompt_tool,
         )
 
         logger.info(f"Spawning containerized session {self.agent_id}...")

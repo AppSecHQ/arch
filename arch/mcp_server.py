@@ -134,6 +134,28 @@ WORKER_TOOLS = [
             "required": ["files_modified", "progress", "next_steps"]
         }
     ),
+    Tool(
+        name="handle_permission_request",
+        description="Request permission to use a tool not in the pre-approved list. BLOCKS until user responds.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "name of the tool requesting permission"
+                },
+                "tool_args": {
+                    "type": "string",
+                    "description": "summary of arguments being passed to the tool"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "why you need to use this tool"
+                }
+            },
+            "required": ["tool_name", "reason"]
+        }
+    ),
 ]
 
 # Tools available ONLY to Archie
@@ -420,6 +442,10 @@ class MCPServer:
         # Pending escalations: decision_id -> asyncio.Event
         self._pending_escalations: dict[str, asyncio.Event] = {}
 
+        # Runtime permission allowlist: agent_id -> set of tool patterns
+        # Session-scoped: populated when user chooses "always" for a permission
+        self._runtime_allowed: dict[str, set[str]] = {}
+
         # Persistent MCP server instances per agent
         self._mcp_servers: dict[str, Server] = {}
 
@@ -640,6 +666,100 @@ class MCPServer:
                 self._pending_escalations[decision_id].set()
                 return True
         return False
+
+    def _check_runtime_allowed(self, agent_id: str, tool_name: str) -> bool:
+        """
+        Check if a tool is in the runtime allowlist for an agent.
+
+        Returns True if the tool was previously approved with "always".
+        """
+        if agent_id not in self._runtime_allowed:
+            return False
+        return tool_name in self._runtime_allowed[agent_id]
+
+    def add_runtime_allowed(self, agent_id: str, tool_name: str) -> None:
+        """
+        Add a tool to the runtime allowlist for an agent.
+
+        Called when user chooses "always" for a permission request.
+        """
+        if agent_id not in self._runtime_allowed:
+            self._runtime_allowed[agent_id] = set()
+        self._runtime_allowed[agent_id].add(tool_name)
+        logger.info(f"Added {tool_name} to runtime allowlist for {agent_id}")
+
+    async def _handle_permission_request(
+        self,
+        agent_id: str,
+        tool_name: str,
+        tool_args: Optional[str] = None,
+        reason: str = ""
+    ) -> dict[str, Any]:
+        """
+        Handle permission request for a tool not in the pre-approved list.
+
+        BLOCKS until user answers via the dashboard.
+        Returns:
+            - {"approved": True} if permission granted
+            - {"approved": False, "reason": "..."} if denied
+        """
+        # Check if already approved via "always"
+        if self._check_runtime_allowed(agent_id, tool_name):
+            logger.debug(f"Permission for {tool_name} auto-approved for {agent_id}")
+            return {"approved": True, "source": "runtime_allowlist"}
+
+        # Build the question for the user
+        question = f"Agent '{agent_id}' requests permission to use tool: {tool_name}"
+        if tool_args:
+            question += f"\nArguments: {tool_args}"
+        if reason:
+            question += f"\nReason: {reason}"
+
+        # Options: [y]once, [a]lways, [n]o
+        options = ["yes (this time)", "always (this session)", "no"]
+
+        # Create pending decision
+        decision = self.state.add_pending_decision(question, options)
+        decision_id = decision["id"]
+
+        # Tag the decision as a permission request for the dashboard
+        # (Store metadata in the decision for the dashboard to recognize)
+        self.state._state["pending_user_decisions"][-1]["type"] = "permission_request"
+        self.state._state["pending_user_decisions"][-1]["agent_id"] = agent_id
+        self.state._state["pending_user_decisions"][-1]["tool_name"] = tool_name
+
+        # Create event for blocking
+        event = asyncio.Event()
+        self._pending_escalations[decision_id] = event
+
+        logger.info(f"Permission request {decision_id}: {agent_id} wants {tool_name}")
+
+        # Block until answered
+        await event.wait()
+
+        # Clean up
+        del self._pending_escalations[decision_id]
+
+        # Get the answer
+        decisions = [
+            d for d in self.state._state["pending_user_decisions"]
+            if d["id"] == decision_id
+        ]
+
+        if not decisions or not decisions[0].get("answer"):
+            return {"approved": False, "reason": "No answer received"}
+
+        answer = decisions[0]["answer"].lower()
+
+        # Handle the response
+        if answer.startswith("yes"):
+            return {"approved": True, "source": "user_once"}
+        elif answer.startswith("always"):
+            # Add to runtime allowlist
+            self.add_runtime_allowed(agent_id, tool_name)
+            return {"approved": True, "source": "user_always"}
+        else:
+            return {"approved": False, "reason": "User denied permission"}
 
     async def _handle_request_merge(
         self,
@@ -1034,6 +1154,8 @@ class MCPServer:
             return await self._handle_report_completion(agent_id, **arguments)
         elif tool_name == "save_progress":
             return await self._handle_save_progress(agent_id, **arguments)
+        elif tool_name == "handle_permission_request":
+            return await self._handle_permission_request(agent_id=agent_id, **arguments)
 
         # Archie-only tools
         elif tool_name == "spawn_agent":

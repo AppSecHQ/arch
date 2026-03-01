@@ -44,6 +44,24 @@ DEFAULT_CONTAINER_IMAGE = "arch-agent:latest"
 DEFAULT_ARCHIE_PERSONA = "personas/archie.md"
 DEFAULT_SHUTDOWN_TIMEOUT = 30
 
+# Default allowed tools for all agents (safe file operations)
+# These map to --allowedTools CLI flags
+DEFAULT_ALLOWED_TOOLS_ALL = [
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "Bash(git:*)",  # Git operations only
+]
+
+# Additional tools for Archie (lead agent coordination)
+DEFAULT_ALLOWED_TOOLS_ARCHIE = [
+    *DEFAULT_ALLOWED_TOOLS_ALL,
+    "Bash(gh:*)",  # GitHub CLI for issue/PR management
+    "Task",  # Subagent spawning
+]
+
 
 # ============================================================================
 # Configuration Dataclasses
@@ -80,6 +98,7 @@ class SandboxConfig:
 class PermissionsConfig:
     """Permission settings for an agent."""
     skip_permissions: bool = False
+    allowed_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -194,6 +213,7 @@ def parse_config(config_path: Path) -> ArchConfig:
         perms_raw = entry.get("permissions", {})
         permissions = PermissionsConfig(
             skip_permissions=perms_raw.get("skip_permissions", False),
+            allowed_tools=perms_raw.get("allowed_tools", []),
         )
 
         agent_pool.append(AgentPoolEntry(
@@ -785,6 +805,9 @@ class Orchestrator:
         )
 
         # Create agent config (Archie never runs in container)
+        # Merge default allowed tools with any user-configured ones
+        archie_allowed_tools = list(DEFAULT_ALLOWED_TOOLS_ARCHIE)
+
         config = AgentConfig(
             agent_id="archie",
             role="lead",
@@ -792,6 +815,8 @@ class Orchestrator:
             worktree=str(worktree_path),
             sandboxed=False,
             skip_permissions=False,
+            allowed_tools=archie_allowed_tools,
+            permission_prompt_tool=f"mcp__arch__handle_permission_request",
         )
 
         # Build initial prompt
@@ -950,6 +975,14 @@ class Orchestrator:
                 skip_permissions=actual_skip_permissions,
             )
 
+            # Build allowed tools list: defaults + user config
+            agent_allowed_tools = list(DEFAULT_ALLOWED_TOOLS_ALL)
+            if pool_entry.permissions.allowed_tools:
+                # Add user-configured tools, avoiding duplicates
+                for tool in pool_entry.permissions.allowed_tools:
+                    if tool not in agent_allowed_tools:
+                        agent_allowed_tools.append(tool)
+
             # Build AgentConfig
             agent_config = AgentConfig(
                 agent_id=agent_id,
@@ -958,6 +991,8 @@ class Orchestrator:
                 worktree=str(worktree_path),
                 sandboxed=pool_entry.sandbox.enabled,
                 skip_permissions=actual_skip_permissions,
+                allowed_tools=agent_allowed_tools,
+                permission_prompt_tool=f"mcp__arch__handle_permission_request",
                 container_image=pool_entry.sandbox.image,
                 container_memory_limit=pool_entry.sandbox.memory_limit,
                 container_cpus=pool_entry.sandbox.cpus,
