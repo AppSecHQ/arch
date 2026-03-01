@@ -64,6 +64,29 @@ Each item notes which step introduced it and which step it must be fixed by.
 
 ## Orchestrator (Step 8)
 
+- [ ] **CRITICAL: Agents block on permission approval** — When agents are spawned with `--print --output-format stream-json`, the claude CLI still requires user approval for tool calls. Since agents run as background subprocesses with no TTY, they block indefinitely waiting for input that never comes. This was discovered during first real-world test: archie spawned but accumulated only 0.69s CPU time over 8+ minutes because it was blocked waiting for permission to call `get_project_context`.
+
+  **Root cause:** `skip_permissions=False` in `_spawn_archie()` and no explicit permission configuration for agents.
+
+  **Symptoms:**
+  - Agent shows `status: "working"` but `usage.input_tokens: 0`
+  - Debug log (`~/.claude/debug/latest`) shows only initialization, no API calls
+  - Process runs but CPU time stays near zero
+
+  **Design considerations for fix:**
+  1. **Visibility required** — Blanket `--dangerously-skip-permissions` is risky for an untested system. User should have visibility into what permissions agents need.
+  2. **Pre-configured permissions** — `arch.yaml` should allow specifying allowed tools/actions per agent role, translating to `--allowedTools` flags.
+  3. **Runtime permission requests** — If an agent requests a permission not pre-approved, the request should surface to the dashboard where the user can approve it (this session / always for project / always forever).
+  4. **Escalation pattern** — Could extend the existing `escalate_to_user` blocking pattern for permission requests.
+
+  **Potential solutions:**
+  - Add `permissions:` section to `arch.yaml` with `allowed_tools:` list per agent role
+  - Use `--permission-mode delegate` to allow more granular control
+  - Implement permission request forwarding through the dashboard
+  - As a stopgap, document that users must run with explicit permission flags
+
+  **This blocks all agent execution.** Must be resolved before ARCH is usable.
+
 - [ ] **`atexit` handler fires during tests** — "Emergency cleanup on exit" prints 8 times during test suite. The `atexit.register` in `_register_signal_handlers` is never unregistered. Add `atexit.unregister` in `_restore_signal_handlers` or guard the handler against test contexts.
 - [ ] **`_permission_gate` uses blocking `input()`** — `input()` blocks the async event loop. Works for CLI usage but prevents automated/headless startup. Consider `asyncio.to_thread(input)` or a callback pattern.
 - [x] **CRITICAL: No spawn_agent integration** — FIXED in Step 8 follow-up (commit `2aa2d9e`). Orchestrator now wires `on_spawn_agent`, `on_teardown_agent`, `on_request_merge`, `on_close_project` callbacks. 10 new lifecycle tests added.
