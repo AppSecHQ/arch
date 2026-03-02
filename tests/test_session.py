@@ -443,7 +443,7 @@ class TestSessionExit:
 
         messages, _ = session.state.get_messages("archie")
         assert len(messages) == 1
-        assert "exited unexpectedly" in messages[0]["content"]
+        assert "exited with code 1" in messages[0]["content"]
         assert "test-agent" in messages[0]["content"]
 
     @pytest.mark.asyncio

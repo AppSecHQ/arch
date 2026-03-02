@@ -238,6 +238,7 @@ class ContainerSession:
             "claude",
             "--model", self.model,
             "--output-format", "stream-json",
+            "--verbose",
             "--mcp-config", "/arch/mcp-config.json",
             "--print",
         ]
