@@ -135,14 +135,14 @@ class TestAccessControl:
         assert mcp_server._check_tool_access("frontend-1", "handle_permission_request") is True
         assert mcp_server._check_tool_access("archie", "handle_permission_request") is True
 
-    def test_system_tools_not_in_agent_catalogs(self, mcp_server):
-        """System tools are NOT listed in agent tool catalogs."""
+    def test_system_tools_in_agent_catalogs(self, mcp_server):
+        """System tools are listed in agent catalogs for CLI discovery."""
         worker_tools = mcp_server._get_tools_for_agent("frontend-1")
         archie_tools = mcp_server._get_tools_for_agent("archie")
         worker_names = {t.name for t in worker_tools}
         archie_names = {t.name for t in archie_tools}
-        assert "handle_permission_request" not in worker_names
-        assert "handle_permission_request" not in archie_names
+        assert "handle_permission_request" in worker_names
+        assert "handle_permission_request" in archie_names
 
 
 class TestWorkerTools:

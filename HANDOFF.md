@@ -4,7 +4,8 @@
 
 **Steps Completed: 1-13 of 13** ✅
 **Tests: 440 passing**
-**Last Commit:** dc002fb
+**Last Commit:** 029cd17
+**UAT Status:** In progress — Archie launches but hangs (0 tokens). Fix pending commit.
 
 ## Completed Components
 
@@ -25,74 +26,48 @@
 | 12 | `arch.py` | CLI entrypoint: up/down/status/init/send commands, PID file, GitHub label setup | 31 |
 | 13 | `tests/test_integration.py` | End-to-end integration tests with real git operations | 16 |
 
-## All Steps Complete
+## Post-Build Fixes (Review Cycle)
 
-ARCH v1 implementation is complete per SPEC-AGENT-HARNESS.md.
+### Issue #4: Agent permissions — FIXED (multiple rounds)
 
-## Post-Build Fixes
+UAT #1 revealed agents blocked on permission prompts (no TTY). Builder implemented three-layer permission system (`e633bf9`).
 
-### Issue #4: Agent permissions — FIXED
+**Builder's implementation:**
+- `--permission-mode acceptEdits` + `--allowedTools` + `--permission-prompt-tool` flags in session.py/container.py
+- `handle_permission_request` MCP tool with blocking + `_runtime_allowed` dict
+- Dashboard `[y]once [a]lways [n]o` UI for permission requests
+- Config parsing for `permissions.allowed_tools` per role
 
-UAT revealed agents blocked on permission prompts (no TTY). Builder implemented three-layer permission system (`e633bf9`). Review found 4 bugs; fixed in `db2f061`:
-
-1. MCP tools missing from default allowed lists (agents still blocked on every MCP call)
+**Review fix #1 (`db2f061`):** 4 bugs found and fixed:
+1. MCP tools missing from `DEFAULT_ALLOWED_TOOLS_ALL` / `DEFAULT_ALLOWED_TOOLS_ARCHIE` — without them agents blocked on every MCP call
 2. Wrong Bash pattern syntax: `Bash(git:*)` → `Bash(git *)` per Claude CLI docs
-3. `--permission-prompt-tool` was commented out (no race condition — MCP starts before agents)
-4. `handle_permission_request` was in `WORKER_TOOLS` (agents could call it directly) — moved to `SYSTEM_TOOLS`
+3. `--permission-prompt-tool` was commented out with incorrect race condition concern
+4. `handle_permission_request` in `WORKER_TOOLS` (agents could call directly) → moved to `SYSTEM_TOOLS`
 
-### CLI rename: `arch` → `archie` — FIXED
+**Review fix #2 (uncommitted, ready to commit):** UAT #2 showed Archie still hangs (0 tokens, debug log ends at init). Cause: `SYSTEM_TOOLS` were excluded from `_get_tools_for_agent()` tool catalog. Claude CLI's `--permission-prompt-tool` references `mcp__arch__handle_permission_request` but can't discover it via MCP protocol. Fix: include `SYSTEM_TOOLS` in tool catalog returned by `_get_tools_for_agent()`.
 
-`/usr/bin/arch` is a macOS system binary. Renamed CLI entry point to `archie` (`dc002fb`). Config file stays `arch.yaml`.
+### CLI rename: `arch` → `archie` (`dc002fb`)
 
----
+`/usr/bin/arch` is a macOS system binary. Renamed all CLI user-facing references to `archie`. Config file stays `arch.yaml`. No `pyproject.toml` yet — run as `python arch.py up`.
+
+### Path resolution issue (known, not yet fixed)
+
+`repo: "."` and `state_dir: "./state"` in arch.yaml resolve relative to **cwd**, not the config file location. Workaround: run from the project directory. Proper fix: resolve relative to `config_path.parent` in orchestrator.
+
+### Test coverage gap (known)
+
+All 440 tests pass but every test mocks `create_subprocess_exec`, Docker, and MCP server start/stop. No test runs a real `claude` process connecting to a real MCP server. All UAT bugs (permission blocking, tool discovery, path resolution) were invisible to the test suite. Need a real smoke test that starts the MCP server and has a client connect and discover tools.
+
+## Open GitHub Issues
+
+| # | Title | Status |
+|---|-------|--------|
+| [#3](https://github.com/AppSecHQ/arch/issues/3) | Skills integration (v2) | Open — deferred |
+| [#4](https://github.com/AppSecHQ/arch/issues/4) | Agent permissions | Implemented, UAT in progress |
+
+Closed: [#1](https://github.com/AppSecHQ/arch/issues/1) (feedback), [#2](https://github.com/AppSecHQ/arch/issues/2) (auto-resume + arch send)
 
 ## Key Architecture
-
-### Dashboard Features (Step 9)
-
-**Layout:**
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  ARCH  ·  ProjectName  ·  Runtime: 00:14:32      [q]uit  [?]help   │
-├───────────────┬──────────────────────────────────┬──────────────────┤
-│ AGENTS        │ ACTIVITY LOG                     │ COSTS            │
-│               │                                  │                  │
-│ ● archie      │ 14:01 archie   Spawning fe-dev-1 │ archie   $0.12   │
-│   Coordinating│ 14:02 fe-dev   Starting NavBar   │ fe-dev   $0.04   │
-│               │ 14:03 qa-1     Running tests     │ qa-1     $0.02   │
-│ ●[c] fe-dev-1 │ 14:04 fe-dev   BLOCKED: needs API│ ──────────────   │
-│   Building    │ 14:05 archie   Checking in       │ Total    $0.19   │
-│   NavBar      │                                  │ Budget   $5.00   │
-│               │                                  │ ████░░   3.8%    │
-│ ●[c][!] sec-1 │                                  │                  │
-├───────────────┴──────────────────────────────────┴──────────────────┤
-│ ⚠ ARCHIE ASKS: Merge frontend-dev-1 worktree to main? [y/N]: _     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Status indicators:**
-- `●` green — working
-- `●` yellow — blocked/waiting_review
-- `○` bright_black — idle
-- `✓` green — done
-- `✗` red — error
-- `[c]` — containerized
-- `[!]` — skip_permissions
-
-**Keyboard shortcuts:**
-- `q` — graceful shutdown
-- `?` — help overlay
-- `l` — Archie's log
-- `1-9` — agent logs
-- `m` — message bus
-
-**Integration:**
-- `StateStore.list_agents()` → agents panel
-- `StateStore.get_all_messages()` → activity log
-- `StateStore.get_pending_decisions()` → escalation panel
-- `TokenTracker.get_all_usage()` → costs panel
-- `MCPServer.answer_escalation()` → handles user input
-- 2-second refresh interval
 
 ### Agent Lifecycle Flow
 ```
@@ -106,32 +81,41 @@ Archie calls spawn_agent via MCP
   ← Returns {agent_id, worktree_path, sandboxed, status}
 ```
 
+### Permission System (Three Layers)
+1. `--permission-mode acceptEdits` — auto-approves Read, Edit, Write, Glob, Grep
+2. `--allowedTools` — per-role whitelist from `DEFAULT_ALLOWED_TOOLS_ALL` / `_ARCHIE` + user config
+3. `--permission-prompt-tool mcp__arch__handle_permission_request` — runtime delegation to dashboard
+
 ### Session Types
 - `Session` — local subprocess
 - `ContainerizedSession` — Docker container with stream parsing
-- `AnySession = Session | ContainerizedSession`
 - `SessionManager.spawn()` auto-delegates based on `config.sandboxed`
 
 ### Config file
-- `arch.yaml` (renamed from archie.yaml — system config, not persona)
+- `arch.yaml` — system config
+- CLI command: `python arch.py` (alias `archie` once pyproject.toml is added)
+
+### UAT test project
+- Location: `~/claude-projects/arch-test-1` (Mortgage Calculator)
+- Run from project dir: `cd ~/claude-projects/arch-test-1 && source ~/claude-projects/arch/.venv/bin/activate && python ~/claude-projects/arch/arch.py up`
 
 ## Running Tests
 
 ```bash
 source .venv/bin/activate
-python -m pytest tests/ -v
+GIT_CONFIG_GLOBAL=/dev/null python -m pytest tests/ -v
 ```
 
-## Quick Verification
+## Files Modified This Session
 
-```bash
-source .venv/bin/activate
-python -c "
-from arch.orchestrator import Orchestrator
-from arch.mcp_server import MCPServer
-from arch.session import SessionManager, ContainerizedSession
-from arch.state import StateStore
-from arch.dashboard import Dashboard, run_dashboard
-print('All modules ready')
-"
-```
+- `arch/orchestrator.py` — DEFAULT_ALLOWED_TOOLS constants with MCP tools, fixed Bash syntax, enabled permission_prompt_tool
+- `arch/mcp_server.py` — SYSTEM_TOOLS list, _get_tools_for_agent includes system tools, _check_tool_access allows system tools
+- `arch/session.py` — (builder) allowed_tools + permission_prompt_tool in AgentConfig and spawn()
+- `arch/container.py` — (builder) same permission flags for containerized sessions
+- `arch/dashboard.py` — (builder) permission request UI with y/a/n
+- `arch.py` — CLI rename arch → archie
+- `tests/test_mcp_server.py` — SYSTEM_TOOLS tests, tool catalog tests
+- `tests/test_session.py` — fixed Bash pattern syntax in tests
+- `tests/test_cli.py` — updated "archie up" reference
+- `KNOWN-ISSUES.md` — documented all fixes
+- `HANDOFF.md` — this file

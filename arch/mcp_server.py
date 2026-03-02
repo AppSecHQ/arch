@@ -476,15 +476,15 @@ class MCPServer:
     def _get_tools_for_agent(self, agent_id: str) -> list[Tool]:
         """Get the list of tools available to an agent.
 
-        Note: SYSTEM_TOOLS are not listed here — they are not visible in agent
-        tool catalogs but are callable via dispatch (used by --permission-prompt-tool).
+        SYSTEM_TOOLS (e.g., handle_permission_request) are included in the
+        catalog so Claude CLI can discover them for --permission-prompt-tool.
         """
         if self._is_archie(agent_id):
-            tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS
+            tools = WORKER_TOOLS + ARCHIE_ONLY_TOOLS + SYSTEM_TOOLS
             if self.github_repo:
                 tools = tools + GITHUB_TOOLS
             return tools
-        return WORKER_TOOLS
+        return WORKER_TOOLS + SYSTEM_TOOLS
 
     def _check_tool_access(self, agent_id: str, tool_name: str) -> bool:
         """Check if an agent has access to a tool.
