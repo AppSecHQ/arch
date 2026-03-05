@@ -152,6 +152,8 @@ class Session:
         self._session_id: Optional[str] = None
         self._running = False
         self._output_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._exit_code: Optional[int] = None
 
     @property
     def agent_id(self) -> str:
@@ -162,6 +164,11 @@ class Session:
     def is_running(self) -> bool:
         """Check if the session is running."""
         return self._running and self._process is not None
+
+    @property
+    def exit_code(self) -> Optional[int]:
+        """Get the exit code from the last run. None if still running or never ran."""
+        return self._exit_code
 
     @property
     def session_id(self) -> Optional[str]:
@@ -245,7 +252,7 @@ class Session:
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=None,  # Inherit parent's stderr so errors are visible
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self.config.worktree if self.config.worktree else None,
             )
 
@@ -259,6 +266,9 @@ class Session:
 
             # Start output processing task
             self._output_task = asyncio.create_task(self._process_output())
+
+            # Start stderr processing task
+            self._stderr_task = asyncio.create_task(self._process_stderr())
 
             # Update state
             self.state.update_agent(
@@ -322,8 +332,37 @@ class Session:
             exit_code = await self._process.wait()
             await self._handle_exit(exit_code)
 
+    async def _process_stderr(self) -> None:
+        """Read stderr and surface lines as system messages in state store."""
+        if not self._process or not self._process.stderr:
+            return
+
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+
+                line_str = line.decode("utf-8", errors="replace").strip()
+                if not line_str:
+                    continue
+
+                # Log it and add as a system message so the dashboard can display it
+                logger.debug(f"[{self.agent_id} stderr] {line_str}")
+                self.state.add_message(
+                    from_agent=self.config.agent_id,
+                    to_agent="system",
+                    content=f"[stderr] {line_str}",
+                )
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error processing stderr for {self.agent_id}: {e}")
+
     async def _handle_exit(self, exit_code: int) -> None:
         """Handle subprocess exit."""
+        self._exit_code = exit_code
         self._running = False
         logger.info(f"Session {self.agent_id} exited with code {exit_code}")
 
@@ -382,13 +421,14 @@ class Session:
 
             self._running = False
 
-            # Cancel output task
-            if self._output_task and not self._output_task.done():
-                self._output_task.cancel()
-                try:
-                    await self._output_task
-                except asyncio.CancelledError:
-                    pass
+            # Cancel output and stderr tasks
+            for task in [self._output_task, self._stderr_task]:
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
             return True
 
@@ -460,6 +500,7 @@ class ContainerizedSession:
         self._session_id: Optional[str] = None
         self._running = False
         self._output_task: Optional[asyncio.Task] = None
+        self._exit_code: Optional[int] = None
 
     @property
     def agent_id(self) -> str:
@@ -470,6 +511,11 @@ class ContainerizedSession:
     def is_running(self) -> bool:
         """Check if the session is running."""
         return self._running and self._container_session is not None
+
+    @property
+    def exit_code(self) -> Optional[int]:
+        """Get the exit code from the last run. None if still running or never ran."""
+        return self._exit_code
 
     @property
     def session_id(self) -> Optional[str]:
@@ -621,6 +667,7 @@ class ContainerizedSession:
 
     async def _handle_exit(self, exit_code: int) -> None:
         """Handle container exit."""
+        self._exit_code = exit_code
         self._running = False
         logger.info(f"Containerized session {self.agent_id} exited with code {exit_code}")
 

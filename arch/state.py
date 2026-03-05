@@ -112,6 +112,12 @@ class StateStore:
             }
             self._flush()
 
+    def update_project(self, **kwargs: Any) -> None:
+        """Update project metadata fields."""
+        with self._lock:
+            self._state["project"].update(kwargs)
+            self._flush()
+
     def get_project(self) -> dict[str, str]:
         """Get project metadata."""
         with self._lock:

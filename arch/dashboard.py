@@ -147,8 +147,13 @@ class ActivityPanel(Static):
         if len(content) > 50:
             content = content[:47] + "..."
 
-        # Color blocked messages differently
-        if "BLOCKED" in content.upper():
+        # Color messages by type
+        if "[stderr]" in content:
+            stderr_text = content.replace("[stderr] ", "")
+            if len(stderr_text) > 50:
+                stderr_text = stderr_text[:47] + "..."
+            log.write(f"[dim]{ts} {sender:10} {stderr_text}[/dim]")
+        elif "BLOCKED" in content.upper():
             log.write(f"[yellow]{ts} {sender:10} {content}[/yellow]")
         else:
             log.write(f"{ts} {sender:10} {content}")
@@ -532,7 +537,13 @@ class Dashboard(App):
         # Update runtime
         project = self.state.get_project()
         self.runtime = format_runtime(project.get("started_at"))
-        self.sub_title = f"Runtime: {self.runtime}"
+
+        # Check for project completion
+        if project.get("status") == "complete":
+            summary = project.get("summary", "All tasks complete.")
+            self.sub_title = f"COMPLETE — {summary} — Press q to exit"
+        else:
+            self.sub_title = f"Runtime: {self.runtime}"
 
         # Update agents
         agents = self.state.list_agents()

@@ -462,11 +462,12 @@ class TestOrchestratorArchieRestart:
 
     @pytest.mark.asyncio
     async def test_archie_restart_with_session_id(self, orchestrator, mock_all_gates):
-        """Archie restart uses session ID for resume."""
+        """Archie crash restart uses session ID for resume."""
         await orchestrator.startup()
 
-        # Simulate Archie exit
+        # Simulate Archie crash (non-zero exit code)
         orchestrator._archie_session._running = False
+        orchestrator._archie_session._exit_code = 1
         orchestrator._archie_session._session_id = "test-session-id"
 
         # Mock spawn for restart
@@ -481,13 +482,40 @@ class TestOrchestratorArchieRestart:
         call_args = orchestrator.session_manager.spawn.call_args
         assert call_args[1]["resume_session_id"] == "test-session-id"
 
+        # Config should include allowed_tools
+        config = call_args[0][0]
+        assert len(config.allowed_tools) > 0
+        assert config.permission_prompt_tool == "mcp__arch__handle_permission_request"
+
     @pytest.mark.asyncio
-    async def test_archie_restart_limit(self, orchestrator, mock_all_gates):
-        """Archie restart fails after multiple attempts."""
+    async def test_archie_normal_exit_no_restart(self, orchestrator, mock_all_gates):
+        """Normal Archie exit (code 0) does not trigger restart."""
         await orchestrator.startup()
 
-        orchestrator._archie_restart_count = 1
+        # Simulate normal exit
         orchestrator._archie_session._running = False
+        orchestrator._archie_session._exit_code = 0
+
+        # Mock spawn
+        orchestrator.session_manager.spawn = AsyncMock()
+
+        await orchestrator._handle_archie_exit()
+
+        # Should NOT attempt restart
+        orchestrator.session_manager.spawn.assert_not_called()
+        # Should NOT request shutdown
+        assert orchestrator._shutdown_requested is False
+        # Crash counter should be reset
+        assert orchestrator._crash_restart_count == 0
+
+    @pytest.mark.asyncio
+    async def test_archie_crash_restart_limit(self, orchestrator, mock_all_gates):
+        """Archie shutdown after multiple crash restarts."""
+        await orchestrator.startup()
+
+        orchestrator._crash_restart_count = 2
+        orchestrator._archie_session._running = False
+        orchestrator._archie_session._exit_code = 1  # Crash
 
         await orchestrator._handle_archie_exit()
 
@@ -660,14 +688,17 @@ class TestAgentLifecycleHandlers:
         assert result["pr_url"] == "https://github.com/owner/repo/pull/123"
 
     @pytest.mark.asyncio
-    async def test_close_project_triggers_shutdown(self, orchestrator_with_pool, mock_all_gates):
-        """close_project sets shutdown flag."""
+    async def test_close_project_marks_complete(self, orchestrator_with_pool, mock_all_gates):
+        """close_project marks project complete and adds summary to state."""
         await orchestrator_with_pool.startup()
 
         result = await orchestrator_with_pool._handle_close_project("Work complete")
 
         assert result is True
-        assert orchestrator_with_pool._shutdown_requested is True
+        assert orchestrator_with_pool._project_complete is True
+        project = orchestrator_with_pool.state.get_project()
+        assert project["status"] == "complete"
+        assert project["summary"] == "Work complete"
 
     @pytest.mark.asyncio
     async def test_spawn_decrements_on_exit(self, orchestrator_with_pool, mock_all_gates):
@@ -784,16 +815,16 @@ class TestArchieAutoResume:
         orchestrator.session_manager.spawn.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_auto_resume_not_triggered_restart_limit_exceeded(self, orchestrator, mock_all_gates):
-        """Auto-resume does not trigger when restart limit exceeded."""
+    async def test_auto_resume_not_triggered_resume_limit_exceeded(self, orchestrator, mock_all_gates):
+        """Auto-resume does not trigger when message resume limit exceeded."""
         import time
 
         await orchestrator.startup()
 
-        # Simulate Archie exit with restart limit exceeded
+        # Simulate Archie exit with resume limit exceeded
         orchestrator._archie_session._running = False
         orchestrator._archie_last_exit_time = time.time() - 15
-        orchestrator._archie_restart_count = 2  # Limit is 1
+        orchestrator._message_resume_count = 51  # Limit is 50
 
         # Add unread message
         orchestrator.state.add_message("user", "archie", "Hello")
@@ -873,8 +904,8 @@ class TestArchieAutoResume:
         assert "get_messages" in prompt
 
     @pytest.mark.asyncio
-    async def test_resume_for_messages_increments_restart_count(self, orchestrator, mock_all_gates):
-        """_resume_archie_for_messages increments restart count."""
+    async def test_resume_for_messages_increments_resume_count(self, orchestrator, mock_all_gates):
+        """_resume_archie_for_messages increments message resume count."""
         import time
 
         await orchestrator.startup()
@@ -884,7 +915,7 @@ class TestArchieAutoResume:
         orchestrator._archie_session._session_id = "test-session"
         orchestrator._archie_last_exit_time = time.time() - 15
 
-        initial_count = orchestrator._archie_restart_count
+        initial_count = orchestrator._message_resume_count
 
         # Mock spawn
         new_session = MagicMock()
@@ -893,7 +924,7 @@ class TestArchieAutoResume:
 
         await orchestrator._resume_archie_for_messages()
 
-        assert orchestrator._archie_restart_count == initial_count + 1
+        assert orchestrator._message_resume_count == initial_count + 1
 
     @pytest.mark.asyncio
     async def test_handle_archie_exit_records_exit_time(self, orchestrator, mock_all_gates):
@@ -905,20 +936,15 @@ class TestArchieAutoResume:
         # Initially no exit time
         assert orchestrator._archie_last_exit_time is None
 
-        # Simulate Archie exit
+        # Simulate Archie exit (normal, code 0)
         orchestrator._archie_session._running = False
-        orchestrator._archie_session._session_id = "test-session"
-
-        # Mock spawn for restart
-        new_session = MagicMock()
-        new_session.is_running = True
-        orchestrator.session_manager.spawn = AsyncMock(return_value=new_session)
+        orchestrator._archie_session._exit_code = 0
 
         before = time.time()
         await orchestrator._handle_archie_exit()
         after = time.time()
 
-        # Exit time should be recorded
+        # Exit time should be recorded even for normal exits
         assert orchestrator._archie_last_exit_time is not None
         assert before <= orchestrator._archie_last_exit_time <= after
 

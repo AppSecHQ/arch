@@ -99,7 +99,7 @@ def remove_pid_file(state_dir: Path) -> None:
 async def cmd_up(args: argparse.Namespace) -> int:
     """Start ARCH and launch Archie."""
     from arch.orchestrator import Orchestrator
-    from arch.dashboard import run_dashboard_async
+    from arch.dashboard import Dashboard
 
     config_path = Path(args.config)
 
@@ -131,13 +131,37 @@ async def cmd_up(args: argparse.Namespace) -> int:
             remove_pid_file(state_dir)
             return 1
 
-        # Run dashboard (this blocks until shutdown)
-        await run_dashboard_async(
+        def on_dashboard_quit():
+            """User pressed 'q' in the dashboard."""
+            orchestrator._shutdown_requested = True
+
+        # Create dashboard and give orchestrator a reference for clean exit
+        dashboard_app = Dashboard(
             state=orchestrator.state,
             token_tracker=orchestrator.token_tracker,
             mcp_server=orchestrator.mcp_server,
             budget=orchestrator.config.settings.token_budget_usd,
+            on_quit=on_dashboard_quit,
         )
+        orchestrator._dashboard = dashboard_app
+
+        # Run dashboard and orchestrator concurrently
+        dashboard_task = asyncio.create_task(dashboard_app.run_async())
+        orchestrator_task = asyncio.create_task(orchestrator.run())
+
+        # Wait for either to complete (dashboard quit or orchestrator shutdown)
+        done, pending = await asyncio.wait(
+            [dashboard_task, orchestrator_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Cancel whichever is still running
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         return 0
 

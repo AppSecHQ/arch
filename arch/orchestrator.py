@@ -430,9 +430,13 @@ class Orchestrator:
         self._running = False
         self._shutdown_requested = False
         self._archie_session: Optional[AnySession] = None
-        self._archie_restart_count = 0
+        self._crash_restart_count = 0
+        self._message_resume_count = 0
         self._archie_last_exit_time: Optional[float] = None
+        self._archie_exit_handled = False
+        self._project_complete = False
         self._github_enabled = False
+        self._dashboard: Optional[Any] = None
 
         # Agent instance tracking: role -> count of active instances
         self._agent_instance_counts: dict[str, int] = {}
@@ -601,8 +605,15 @@ class Orchestrator:
         while self._running and not self._shutdown_requested:
             await asyncio.sleep(1)
 
-            # Check if Archie needs restart
-            if self._archie_session and not self._archie_session.is_running:
+            # Skip agent management if project is complete (waiting for user to quit)
+            if self._project_complete:
+                continue
+
+            # Check if Archie needs handling after exit (only once per exit)
+            if (self._archie_session
+                    and not self._archie_session.is_running
+                    and not self._archie_exit_handled):
+                self._archie_exit_handled = True
                 await self._handle_archie_exit()
 
             # Auto-resume: if Archie is not running and has unread messages, resume
@@ -633,8 +644,9 @@ class Orchestrator:
         if time.time() - self._archie_last_exit_time < cooldown_seconds:
             return
 
-        # Skip if exceeded restart limits
-        if self._archie_restart_count > 1:
+        # Skip if excessive message resumes (safety valve)
+        if self._message_resume_count > 50:
+            logger.warning("Excessive message resumes, stopping auto-resume")
             return
 
         # Check for unread messages
@@ -833,20 +845,8 @@ class Orchestrator:
             skip_permissions=False,
         )
 
-        # Create agent config (Archie never runs in container)
-        # Merge default allowed tools with any user-configured ones
-        archie_allowed_tools = list(DEFAULT_ALLOWED_TOOLS_ARCHIE)
-
-        config = AgentConfig(
-            agent_id="archie",
-            role="lead",
-            model=self.config.archie.model,
-            worktree=str(worktree_path),
-            sandboxed=False,
-            skip_permissions=False,
-            allowed_tools=archie_allowed_tools,
-            permission_prompt_tool="mcp__arch__handle_permission_request",
-        )
+        # Create agent config
+        config = self._build_archie_config()
 
         # Build initial prompt
         prompt = self._build_archie_prompt()
@@ -882,6 +882,22 @@ class Orchestrator:
         )
 
         return "\n".join(prompt_parts)
+
+    def _build_archie_config(self) -> AgentConfig:
+        """Build the AgentConfig for Archie, used by all spawn/resume paths."""
+        worktree_path = self.worktree_manager.get_worktree_path("archie")
+        archie_allowed_tools = list(DEFAULT_ALLOWED_TOOLS_ARCHIE)
+
+        return AgentConfig(
+            agent_id="archie",
+            role="lead",
+            model=self.config.archie.model,
+            worktree=str(worktree_path),
+            sandboxed=False,
+            skip_permissions=False,
+            allowed_tools=archie_allowed_tools,
+            permission_prompt_tool="mcp__arch__handle_permission_request",
+        )
 
     async def _on_agent_exit(self, agent_id: str, exit_code: int) -> None:
         """Handle agent exit callback."""
@@ -1161,46 +1177,64 @@ class Orchestrator:
         """
         Handle close_project request from Archie.
 
-        Initiates graceful shutdown.
+        Marks the project as complete but keeps the dashboard open
+        so the user can review results before pressing q to quit.
         """
         logger.info(f"Close project requested: {summary}")
-        print(f"\n✓ Project closing: {summary}")
-        self._shutdown_requested = True
+        self._project_complete = True
+
+        # Store summary in state so dashboard can display it
+        self.state.update_project(status="complete", summary=summary)
+
+        # Add a system message so it shows in the activity log
+        self.state.add_message(
+            from_agent="archie",
+            to_agent="system",
+            content=f"Project complete: {summary}",
+        )
+
         return True
 
     async def _handle_archie_exit(self) -> None:
-        """Handle unexpected Archie exit."""
+        """Handle Archie session exit.
+
+        In --print mode, exit code 0 is normal (prompt completed).
+        Only treat non-zero exit codes as crashes requiring immediate restart.
+        """
         # Record exit time for auto-resume cooldown
         self._archie_last_exit_time = time.time()
 
         if self._shutdown_requested:
             return
 
-        self._archie_restart_count += 1
+        # Check exit code to distinguish normal completion from crash
+        exit_code = None
+        if self._archie_session:
+            exit_code = self._archie_session.exit_code
 
-        if self._archie_restart_count > 1:
-            logger.error("Archie has exited unexpectedly multiple times")
-            print("\n❌ Archie has crashed multiple times. Shutting down.")
+        if exit_code is None or exit_code == 0:
+            # Normal exit (--print mode completed prompt).
+            # Don't restart immediately. Let auto-resume handle future messages.
+            logger.info("Archie completed prompt and exited normally")
+            self._crash_restart_count = 0  # Reset on successful completion
+            return
+
+        # Non-zero exit code: this is a crash. Attempt restart.
+        self._crash_restart_count += 1
+
+        if self._crash_restart_count > 2:
+            logger.error("Archie has crashed multiple times")
+            print("\n--- Archie has crashed multiple times. Shutting down.")
             self._shutdown_requested = True
             return
 
-        # Attempt restart with --resume
-        logger.warning("Archie exited unexpectedly, attempting restart...")
+        logger.warning(f"Archie exited with code {exit_code}, attempting restart...")
 
         session_id = self._archie_session.session_id if self._archie_session else None
 
         if session_id:
             logger.info(f"Resuming Archie session: {session_id}")
-            worktree_path = self.worktree_manager.get_worktree_path("archie")
-
-            config = AgentConfig(
-                agent_id="archie",
-                role="lead",
-                model=self.config.archie.model,
-                worktree=str(worktree_path),
-                sandboxed=False,
-                skip_permissions=False,
-            )
+            config = self._build_archie_config()
 
             self._archie_session = await self.session_manager.spawn(
                 config,
@@ -1209,14 +1243,15 @@ class Orchestrator:
             )
 
             if self._archie_session:
+                self._archie_exit_handled = False  # Reset for new session
                 logger.info("Archie restarted successfully")
             else:
                 logger.error("Failed to restart Archie")
-                print("\n❌ Failed to restart Archie. Shutting down.")
+                print("\n--- Failed to restart Archie. Shutting down.")
                 self._shutdown_requested = True
         else:
             logger.error("No session ID available for Archie restart")
-            print("\n❌ Cannot restart Archie (no session ID). Shutting down.")
+            print("\n--- Cannot restart Archie (no session ID). Shutting down.")
             self._shutdown_requested = True
 
     async def _resume_archie_for_messages(self) -> None:
@@ -1225,7 +1260,7 @@ class Orchestrator:
 
         Called by auto-resume logic when messages arrive while Archie is idle.
         """
-        self._archie_restart_count += 1
+        self._message_resume_count += 1
 
         session_id = self._archie_session.session_id if self._archie_session else None
         worktree_path = self.worktree_manager.get_worktree_path("archie")
@@ -1234,14 +1269,7 @@ class Orchestrator:
             logger.error("Cannot resume Archie: worktree not found")
             return
 
-        config = AgentConfig(
-            agent_id="archie",
-            role="lead",
-            model=self.config.archie.model,
-            worktree=str(worktree_path),
-            sandboxed=False,
-            skip_permissions=False,
-        )
+        config = self._build_archie_config()
 
         # Resume with a prompt about unread messages
         prompt = "You have unread messages. Call get_messages and take action."
@@ -1257,6 +1285,7 @@ class Orchestrator:
             self._archie_session = await self.session_manager.spawn(config, prompt)
 
         if self._archie_session:
+            self._archie_exit_handled = False  # Reset for new session
             logger.info("Archie resumed for message handling")
         else:
             logger.error("Failed to resume Archie for messages")
