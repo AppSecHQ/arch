@@ -21,11 +21,15 @@ from arch.token_tracker import (
 # --- Stream-JSON Fixtures ---
 
 USAGE_EVENT = {
-    "type": "usage",
-    "input_tokens": 1500,
-    "output_tokens": 500,
-    "cache_read_input_tokens": 200,
-    "cache_creation_input_tokens": 100
+    "type": "assistant",
+    "message": {
+        "usage": {
+            "input_tokens": 1500,
+            "output_tokens": 500,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 100
+        }
+    }
 }
 
 RESULT_EVENT = {
@@ -43,10 +47,8 @@ ASSISTANT_EVENT = {
 
 # Multi-turn stream output fixture
 STREAM_OUTPUT = """
-{"type": "assistant", "message": {"content": [{"type": "text", "text": "Starting task..."}]}}
-{"type": "usage", "input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 500}
-{"type": "assistant", "message": {"content": [{"type": "text", "text": "Continuing..."}]}}
-{"type": "usage", "input_tokens": 800, "output_tokens": 300, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 0}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Starting task..."}], "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 500}}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Continuing..."}], "usage": {"input_tokens": 800, "output_tokens": 300, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 0}}}
 {"type": "result", "session_id": "session-xyz-789"}
 """.strip()
 
@@ -274,12 +276,12 @@ class TestTokenTracker:
         assert tracker._agents["test"].model == "claude-sonnet-4-6"
 
     def test_parse_usage_event(self, tracker):
-        """parse_stream_event handles usage events."""
+        """parse_stream_event extracts usage from assistant events."""
         tracker.register_agent("test", "claude-sonnet-4-6")
 
         event = tracker.parse_stream_event("test", json.dumps(USAGE_EVENT))
 
-        assert event["type"] == "usage"
+        assert event["type"] == "assistant"
         usage = tracker.get_agent_usage("test")
         assert usage["input_tokens"] == 1500
         assert usage["output_tokens"] == 500
@@ -324,19 +326,23 @@ class TestTokenTracker:
         tracker.register_agent("a2", "claude-sonnet-4-6")
 
         tracker.parse_stream_event("a1", json.dumps({
-            "type": "usage",
-            "input_tokens": 1_000_000,
-            "output_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }}
         }))
 
         tracker.parse_stream_event("a2", json.dumps({
-            "type": "usage",
-            "input_tokens": 1_000_000,
-            "output_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }}
         }))
 
         # Each: 1M * 3.00/M = 3.00
@@ -348,19 +354,23 @@ class TestTokenTracker:
         tracker.register_agent("a2", "claude-sonnet-4-6")
 
         tracker.parse_stream_event("a1", json.dumps({
-            "type": "usage",
-            "input_tokens": 1000,
-            "output_tokens": 500,
-            "cache_read_input_tokens": 100,
-            "cache_creation_input_tokens": 50
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 50
+            }}
         }))
 
         tracker.parse_stream_event("a2", json.dumps({
-            "type": "usage",
-            "input_tokens": 2000,
-            "output_tokens": 1000,
-            "cache_read_input_tokens": 200,
-            "cache_creation_input_tokens": 100
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 2000,
+                "output_tokens": 1000,
+                "cache_read_input_tokens": 200,
+                "cache_creation_input_tokens": 100
+            }}
         }))
 
         totals = tracker.get_total_tokens()
@@ -481,7 +491,7 @@ class TestCostAccuracy:
         ]
 
         for turn in turns:
-            tracker.parse_stream_event("archie", json.dumps({"type": "usage", **turn}))
+            tracker.parse_stream_event("archie", json.dumps({"type": "assistant", "message": {"usage": turn}}))
 
         usage = tracker.get_agent_usage("archie")
 

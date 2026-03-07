@@ -53,8 +53,8 @@ def create_mock_claude_process(session_id="test-session"):
 
     output_lines = [
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Working."}]}}),
-        json.dumps({"type": "usage", "input_tokens": 500, "output_tokens": 200,
-                     "cache_read_input_tokens": 50, "cache_creation_input_tokens": 25}),
+        json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 500, "output_tokens": 200,
+                     "cache_read_input_tokens": 50, "cache_creation_input_tokens": 25}}}),
         json.dumps({"type": "result", "session_id": session_id}),
     ]
 

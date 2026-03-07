@@ -723,10 +723,10 @@ class Dashboard(App):
         self.push_screen(HelpScreen())
 
     def action_view_archie_log(self) -> None:
-        """View Archie's message log."""
+        """View Archie's message log (messages sent by archie)."""
         messages = [
             m for m in self.state.get_all_messages()
-            if m.get("from") == "archie" or m.get("to") == "archie"
+            if m.get("from") == "archie"
         ]
         self.push_screen(MessageLogScreen(messages, "Archie Messages"))
 
@@ -741,7 +741,7 @@ class Dashboard(App):
             agent_id = self._agent_list[index]
             messages = [
                 m for m in self.state.get_all_messages()
-                if m.get("from") == agent_id or m.get("to") == agent_id
+                if m.get("from") == agent_id
             ]
             self.push_screen(MessageLogScreen(messages, f"{agent_id} Messages"))
 

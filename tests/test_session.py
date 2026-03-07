@@ -318,11 +318,13 @@ class TestSessionOutputParsing:
         """Session parses usage events and tracks tokens."""
         # Set up mock to emit usage event
         usage_event = json.dumps({
-            "type": "usage",
-            "input_tokens": 1000,
-            "output_tokens": 500,
-            "cache_read_input_tokens": 100,
-            "cache_creation_input_tokens": 50
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 50
+            }}
         })
 
         mock_process = create_mock_process([usage_event])
@@ -664,11 +666,13 @@ class TestContainerizedSession:
     ):
         """ContainerizedSession parses usage events and tracks tokens."""
         usage_event = json.dumps({
-            "type": "usage",
-            "input_tokens": 2000,
-            "output_tokens": 800,
-            "cache_read_input_tokens": 200,
-            "cache_creation_input_tokens": 100
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 2000,
+                "output_tokens": 800,
+                "cache_read_input_tokens": 200,
+                "cache_creation_input_tokens": 100
+            }}
         })
 
         mock_process = create_mock_process([usage_event])

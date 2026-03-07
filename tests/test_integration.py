@@ -164,7 +164,7 @@ def create_mock_claude_process(output_lines=None, session_id="test-session-123")
     # Add standard output events
     full_output = output_lines + [
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Task completed."}]}}),
-        json.dumps({"type": "usage", "input_tokens": 1000, "output_tokens": 500, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 50}),
+        json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1000, "output_tokens": 500, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 50}}}),
         json.dumps({"type": "result", "session_id": session_id}),
     ]
 
@@ -198,7 +198,7 @@ def create_mock_docker_process():
 
     output_lines = [
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Security audit complete."}]}}),
-        json.dumps({"type": "usage", "input_tokens": 800, "output_tokens": 400, "cache_read_input_tokens": 50, "cache_creation_input_tokens": 25}),
+        json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 800, "output_tokens": 400, "cache_read_input_tokens": 50, "cache_creation_input_tokens": 25}}}),
         json.dumps({"type": "result", "session_id": "container-session-456"}),
     ]
 
@@ -639,11 +639,13 @@ class TestTokenTracking:
             # Register Archie usage
             orch.token_tracker.register_agent("archie", "claude-opus-4-5")
             usage_event = json.dumps({
-                "type": "usage",
-                "input_tokens": 5000,
-                "output_tokens": 2000,
-                "cache_read_input_tokens": 500,
-                "cache_creation_input_tokens": 100
+                "type": "assistant",
+                "message": {"usage": {
+                    "input_tokens": 5000,
+                    "output_tokens": 2000,
+                    "cache_read_input_tokens": 500,
+                    "cache_creation_input_tokens": 100
+                }}
             })
             orch.token_tracker.parse_stream_event("archie", usage_event)
 

@@ -845,6 +845,21 @@ class MCPServer:
         if self.on_close_project is None:
             return {"error": "close_project callback not configured"}
 
+        # Auto-update BRIEF.md current status with the close summary
+        await self._handle_update_brief(
+            section="current_status",
+            content=f"COMPLETE — {summary}"
+        )
+
+        # Notify Archie to review the brief
+        self.state.add_message(
+            from_agent="system",
+            to_agent="archie",
+            content="BRIEF.md has been auto-updated with the project summary. "
+                    "Please review and finalize BRIEF.md — update the Current Status "
+                    "and Decisions Log sections with any remaining details before shutdown."
+        )
+
         result = await self.on_close_project(summary)
         return {"ok": result}
 

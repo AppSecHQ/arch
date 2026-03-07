@@ -533,11 +533,13 @@ class TestCostSummary:
         # Add some usage via parse_stream_event (expects JSON string)
         orchestrator.token_tracker.register_agent("archie", "claude-opus-4-5")
         usage_line = json.dumps({
-            "type": "usage",
-            "input_tokens": 1000,
-            "output_tokens": 500,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "type": "assistant",
+            "message": {"usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }}
         })
         orchestrator.token_tracker.parse_stream_event("archie", usage_line)
 

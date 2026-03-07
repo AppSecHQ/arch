@@ -257,13 +257,14 @@ class TokenTracker:
         except json.JSONDecodeError:
             return None
 
-        # Handle usage events
-        if event.get("type") == "usage":
-            self._handle_usage_event(agent_id, event)
+        # Handle assistant events (per-turn usage in message.usage)
+        if event.get("type") == "assistant":
+            usage = (event.get("message") or {}).get("usage")
+            if usage:
+                self._handle_usage_event(agent_id, usage)
 
-        # Handle result events (contains session_id)
+        # Handle result events (final totals — session_id extracted by caller)
         if event.get("type") == "result":
-            # Return the event so caller can extract session_id
             pass
 
         return event
