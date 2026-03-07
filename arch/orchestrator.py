@@ -1099,6 +1099,22 @@ class Orchestrator:
                     logger.info(f"Stopped session for {agent_id}")
                 self.session_manager.remove_session(agent_id)
 
+            # Auto-merge unmerged work before removing worktree
+            if self.worktree_manager and self.worktree_manager.exists(agent_id):
+                try:
+                    branch = f"agent/{agent_id}"
+                    # Check if branch has unmerged commits
+                    result = subprocess.run(
+                        ["git", "log", "main.." + branch, "--oneline"],
+                        cwd=self.worktree_manager.repo_path,
+                        capture_output=True, text=True
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        logger.info(f"Auto-merging unmerged work from {agent_id}")
+                        self.worktree_manager.merge(agent_id, "main")
+                except Exception as e:
+                    logger.warning(f"Auto-merge failed for {agent_id}: {e}")
+
             # Remove worktree (unless keep_worktrees is set)
             if self.worktree_manager and not self.keep_worktrees:
                 try:

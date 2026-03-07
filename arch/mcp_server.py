@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Awaitable
@@ -456,6 +457,11 @@ class MCPServer:
 
         # Active SSE transports per agent (for routing POST messages)
         self._active_transports: dict[str, SseServerTransport] = {}
+
+        # Event log (JSONL file in state directory)
+        self._event_log_path: Optional[Path] = None
+        if self.state.state_dir:
+            self._event_log_path = Path(self.state.state_dir) / "events.jsonl"
 
         # Server state
         self._server: Optional[uvicorn.Server] = None
@@ -1163,6 +1169,55 @@ class MCPServer:
 
     # --- Tool Dispatch ---
 
+    def _log_event(
+        self,
+        agent_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        duration_ms: float,
+    ) -> None:
+        """Append tool call event to events.jsonl."""
+        if not self._event_log_path:
+            return
+
+        # Summarize result — keep it compact
+        if isinstance(result, dict):
+            if "error" in result:
+                status = "error"
+                detail = result["error"]
+            else:
+                status = "ok"
+                detail = {k: v for k, v in result.items()
+                          if k in ("agent_id", "ok", "status", "count", "merged")}
+            result_summary = {"status": status, **detail} if isinstance(detail, dict) else {"status": status, "detail": detail}
+        else:
+            result_summary = {"status": "ok"}
+
+        # Summarize large arguments (truncate message content, etc.)
+        args_summary = {}
+        for k, v in arguments.items():
+            if isinstance(v, str) and len(v) > 200:
+                args_summary[k] = v[:200] + "..."
+            else:
+                args_summary[k] = v
+
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "agent_id": agent_id,
+            "tool": tool_name,
+            "args": args_summary,
+            "result": result_summary,
+            "duration_ms": round(duration_ms, 1),
+        }
+
+        try:
+            self._event_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._event_log_path, "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as e:
+            logger.debug(f"Failed to write event log: {e}")
+
     async def _handle_tool_call(
         self,
         agent_id: str,
@@ -1174,56 +1229,62 @@ class MCPServer:
         if not self._check_tool_access(agent_id, tool_name):
             return {"error": f"Access denied: {tool_name} is not available to {agent_id}"}
 
+        start = time.monotonic()
+
         # Worker tools
         if tool_name == "send_message":
-            return await self._handle_send_message(agent_id, **arguments)
+            result = await self._handle_send_message(agent_id, **arguments)
         elif tool_name == "get_messages":
-            return await self._handle_get_messages(agent_id, **arguments)
+            result = await self._handle_get_messages(agent_id, **arguments)
         elif tool_name == "update_status":
-            return await self._handle_update_status(agent_id, **arguments)
+            result = await self._handle_update_status(agent_id, **arguments)
         elif tool_name == "report_completion":
-            return await self._handle_report_completion(agent_id, **arguments)
+            result = await self._handle_report_completion(agent_id, **arguments)
         elif tool_name == "save_progress":
-            return await self._handle_save_progress(agent_id, **arguments)
+            result = await self._handle_save_progress(agent_id, **arguments)
         elif tool_name == "handle_permission_request":
-            return await self._handle_permission_request(agent_id=agent_id, **arguments)
+            result = await self._handle_permission_request(agent_id=agent_id, **arguments)
 
         # Archie-only tools
         elif tool_name == "spawn_agent":
-            return await self._handle_spawn_agent(**arguments)
+            result = await self._handle_spawn_agent(**arguments)
         elif tool_name == "teardown_agent":
-            return await self._handle_teardown_agent(**arguments)
+            result = await self._handle_teardown_agent(**arguments)
         elif tool_name == "list_agents":
-            return await self._handle_list_agents()
+            result = await self._handle_list_agents()
         elif tool_name == "escalate_to_user":
-            return await self._handle_escalate_to_user(**arguments)
+            result = await self._handle_escalate_to_user(**arguments)
         elif tool_name == "request_merge":
-            return await self._handle_request_merge(**arguments)
+            result = await self._handle_request_merge(**arguments)
         elif tool_name == "get_project_context":
-            return await self._handle_get_project_context()
+            result = await self._handle_get_project_context()
         elif tool_name == "close_project":
-            return await self._handle_close_project(**arguments)
+            result = await self._handle_close_project(**arguments)
         elif tool_name == "update_brief":
-            return await self._handle_update_brief(**arguments)
+            result = await self._handle_update_brief(**arguments)
 
         # GitHub tools
         elif tool_name == "gh_create_issue":
-            return await self._handle_gh_create_issue(**arguments)
+            result = await self._handle_gh_create_issue(**arguments)
         elif tool_name == "gh_list_issues":
-            return await self._handle_gh_list_issues(**arguments)
+            result = await self._handle_gh_list_issues(**arguments)
         elif tool_name == "gh_close_issue":
-            return await self._handle_gh_close_issue(**arguments)
+            result = await self._handle_gh_close_issue(**arguments)
         elif tool_name == "gh_update_issue":
-            return await self._handle_gh_update_issue(**arguments)
+            result = await self._handle_gh_update_issue(**arguments)
         elif tool_name == "gh_add_comment":
-            return await self._handle_gh_add_comment(**arguments)
+            result = await self._handle_gh_add_comment(**arguments)
         elif tool_name == "gh_create_milestone":
-            return await self._handle_gh_create_milestone(**arguments)
+            result = await self._handle_gh_create_milestone(**arguments)
         elif tool_name == "gh_list_milestones":
-            return await self._handle_gh_list_milestones()
+            result = await self._handle_gh_list_milestones()
 
         else:
-            return {"error": f"Unknown tool: {tool_name}"}
+            result = {"error": f"Unknown tool: {tool_name}"}
+
+        elapsed = (time.monotonic() - start) * 1000
+        self._log_event(agent_id, tool_name, arguments, result, elapsed)
+        return result
 
     # --- Server Setup ---
 

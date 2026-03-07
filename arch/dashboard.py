@@ -270,6 +270,7 @@ class HelpScreen(ModalScreen[None]):
             Static("  l         View Archie's conversation log"),
             Static("  1-9       View agent conversation logs"),
             Static("  m         View message bus log"),
+            Static("  e         View MCP tool call events"),
             Static("  Escape    Close modals"),
             Static(""),
             Static("Press ? or Escape to close", classes="help-footer"),
@@ -306,6 +307,60 @@ class MessageLogScreen(ModalScreen[None]):
             recipient = msg.get("to", "?")
             content = msg.get("content", "")
             log.write(f"[{ts}] {sender} → {recipient}: {content}")
+
+
+class EventLogScreen(ModalScreen[None]):
+    """Modal screen showing MCP tool call event history."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, events: list[dict[str, Any]], title: str = "MCP Events") -> None:
+        super().__init__()
+        self.events = events
+        self.title_text = title
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(self.title_text, classes="modal-title"),
+            RichLog(id="event-log", highlight=True),
+            Static("Press Escape to close", classes="modal-footer"),
+            id="log-container",
+        )
+
+    def on_mount(self) -> None:
+        """Populate the event log."""
+        log = self.query_one("#event-log", RichLog)
+        for evt in self.events:
+            ts = format_timestamp(evt.get("timestamp", ""))
+            agent = evt.get("agent_id", "?")
+            tool = evt.get("tool", "?")
+            duration = evt.get("duration_ms", 0)
+            result = evt.get("result", {})
+            status = result.get("status", "?") if isinstance(result, dict) else "ok"
+            args = evt.get("args", {})
+
+            # Status indicator
+            icon = "+" if status == "ok" else "!"
+
+            # Format args compactly
+            args_parts = []
+            for k, v in args.items():
+                if isinstance(v, str) and len(v) > 80:
+                    v = v[:80] + "..."
+                args_parts.append(f"{k}={v}")
+            args_str = ", ".join(args_parts) if args_parts else ""
+
+            # Main line
+            log.write(f"[{ts}] {icon} {agent:12} {tool}({args_str})")
+
+            # Detail line for errors or interesting results
+            if status == "error":
+                detail = result.get("detail", "")
+                log.write(f"             ERROR: {detail}")
+            elif duration > 1000:
+                log.write(f"             ({duration:.0f}ms)")
 
 
 class Dashboard(App):
@@ -465,6 +520,7 @@ class Dashboard(App):
         Binding("?", "help", "Help"),
         Binding("l", "view_archie_log", "Archie Log"),
         Binding("m", "view_messages", "Messages"),
+        Binding("e", "view_events", "Events"),
         Binding("1", "view_agent_1", "Agent 1", show=False),
         Binding("2", "view_agent_2", "Agent 2", show=False),
         Binding("3", "view_agent_3", "Agent 3", show=False),
@@ -734,6 +790,27 @@ class Dashboard(App):
         """View full message log."""
         messages = self.state.get_all_messages()
         self.push_screen(MessageLogScreen(messages, "All Messages"))
+
+    def action_view_events(self) -> None:
+        """View MCP tool call event history."""
+        events = self._load_events()
+        self.push_screen(EventLogScreen(events, "MCP Events"))
+
+    def _load_events(self) -> list[dict[str, Any]]:
+        """Load events from events.jsonl."""
+        events_path = Path(self.state.state_dir) / "events.jsonl"
+        if not events_path.exists():
+            return []
+        events = []
+        try:
+            with open(events_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        events.append(json_mod.loads(line))
+        except (json_mod.JSONDecodeError, IOError):
+            pass
+        return events
 
     def _view_agent_log(self, index: int) -> None:
         """View an agent's message log by index."""
