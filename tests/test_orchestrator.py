@@ -45,7 +45,7 @@ class TestParseConfig:
 
         assert config.project.name == "Test Project"
         assert config.project.repo == "."
-        assert config.archie.model == "claude-opus-4-5"
+        assert config.archie.model == "claude-opus-4-6"
         assert config.settings.mcp_port == 3999
 
     def test_parse_full_config(self, tmp_path):

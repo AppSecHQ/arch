@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MCP_PORT = 3999
 DEFAULT_STATE_DIR = "./state"
 DEFAULT_MAX_CONCURRENT_AGENTS = 5
-DEFAULT_ARCHIE_MODEL = "claude-opus-4-5"
+DEFAULT_ARCHIE_MODEL = "claude-opus-4-6"
 DEFAULT_AGENT_MODEL = "claude-sonnet-4-6"
 DEFAULT_CONTAINER_IMAGE = "arch-agent:latest"
 DEFAULT_ARCHIE_PERSONA = "personas/archie.md"
@@ -1004,6 +1004,13 @@ class Orchestrator:
                 if a["status"] not in ("done", "error")
             }
 
+            # Check for persisted session state (from previous run)
+            session_state = None
+            existing_agent = self.state.get_agent(agent_id)
+            if existing_agent and existing_agent.get("context"):
+                session_state = existing_agent["context"]
+                logger.info(f"Injecting session state for {agent_id}")
+
             self.worktree_manager.write_claude_md(
                 agent_id=agent_id,
                 persona_content=persona_content,
@@ -1012,6 +1019,7 @@ class Orchestrator:
                 project_description=self.config.project.description,
                 active_agents=active_agents,
                 available_tools=available_tools,
+                session_state=session_state,
             )
 
             # Register agent in state

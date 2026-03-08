@@ -25,6 +25,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
+    Button,
     Footer,
     Header,
     Input,
@@ -224,23 +225,35 @@ class EscalationPanel(Container):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="escalation-question")
+        yield Horizontal(id="escalation-options")
         yield Input(placeholder="Send a message to Archie...", id="escalation-input")
 
     def watch_question(self, question: str) -> None:
         """Update the question display."""
         q_widget = self.query_one("#escalation-question", Static)
         input_widget = self.query_one("#escalation-input", Input)
+        options_bar = self.query_one("#escalation-options", Horizontal)
+
+        # Clear old option buttons
+        options_bar.remove_children()
 
         if question:
             if self.is_permission_request:
-                display = f"🔐 PERMISSION REQUEST:\n{question}\n"
-                display += "[y]es once  [a]lways  [n]o"
+                display = f"🔐 PERMISSION REQUEST:\n{question}"
                 input_widget.placeholder = "Type y, a, or n..."
+                options_bar.mount(Button("[y]es once", id="opt-y", variant="success"))
+                options_bar.mount(Button("[a]lways", id="opt-a", variant="warning"))
+                options_bar.mount(Button("[n]o", id="opt-n", variant="error"))
+                options_bar.display = True
             else:
                 display = f"⚠ ARCHIE ASKS: {question}"
                 if self.options:
-                    display += f" [{'/'.join(self.options)}]"
-                input_widget.placeholder = "Type your answer and press Enter..."
+                    for i, opt in enumerate(self.options):
+                        options_bar.mount(Button(opt, id=f"opt-{i}", variant="primary"))
+                    options_bar.display = True
+                else:
+                    options_bar.display = False
+                input_widget.placeholder = "Or type a custom answer..."
 
             q_widget.update(display)
             input_widget.focus()
@@ -248,6 +261,7 @@ class EscalationPanel(Container):
             q_widget.update("")
             input_widget.value = ""
             input_widget.placeholder = "Send a message to Archie..."
+            options_bar.display = False
 
 
 class HelpScreen(ModalScreen[None]):
@@ -406,7 +420,7 @@ class Dashboard(App):
 
     #escalation-panel {
         height: auto;
-        max-height: 8;
+        max-height: 12;
         border: solid red;
         padding: 0 1;
     }
@@ -514,6 +528,16 @@ class Dashboard(App):
     #escalation-question {
         height: auto;
         max-height: 4;
+    }
+
+    #escalation-options {
+        height: auto;
+        display: none;
+    }
+
+    #escalation-options Button {
+        min-width: 12;
+        margin: 0 1 0 0;
     }
     """
 
@@ -734,18 +758,33 @@ class Dashboard(App):
 
         if decision_id:
             # Answering a pending escalation
-            self._submit_escalation_answer(event, escalation_panel, decision_id)
+            self._submit_escalation_answer(event.value, escalation_panel, decision_id)
+            event.input.value = ""
         else:
             # Sending a message to Archie
             self._submit_message_to_archie(event)
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle option button clicks for escalations."""
+        escalation_panel = self.query_one("#escalation-panel", EscalationPanel)
+        decision_id = escalation_panel.decision_id
+        if not decision_id:
+            return
+
+        button_id = event.button.id or ""
+        if escalation_panel.is_permission_request:
+            answer_map = {"opt-y": "yes (this time)", "opt-a": "always (this session)", "opt-n": "no"}
+            answer = answer_map.get(button_id, event.button.label.plain)
+        else:
+            answer = event.button.label.plain
+
+        self._submit_escalation_answer(answer, escalation_panel, decision_id)
+
     def _submit_escalation_answer(
-        self, event: Input.Submitted, panel: EscalationPanel, decision_id: str
+        self, answer: str, panel: EscalationPanel, decision_id: str
     ) -> None:
         """Submit an answer to a pending escalation."""
-        answer = event.value
-
-        # For permission requests, expand short answers
+        # For permission requests from typed input, expand short answers
         if panel.is_permission_request:
             answer_lower = answer.lower().strip()
             if answer_lower in ("y", "yes"):
@@ -768,8 +807,7 @@ class Dashboard(App):
         elif self.mcp_server:
             self.mcp_server.answer_escalation(decision_id, answer)
 
-        # Clear the input and question
-        event.input.value = ""
+        # Clear the panel state
         panel.decision_id = None
         panel.is_permission_request = False
         panel.question = ""
