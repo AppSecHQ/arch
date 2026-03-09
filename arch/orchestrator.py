@@ -523,6 +523,7 @@ class Orchestrator:
                 token_tracker=self.token_tracker,
                 state_dir=state_dir,
                 mcp_port=self.config.settings.mcp_port,
+                on_output=self._on_agent_output,
                 on_exit=self._on_agent_exit,
             )
 
@@ -901,6 +902,24 @@ class Orchestrator:
             allowed_tools=archie_allowed_tools,
             permission_prompt_tool="mcp__arch__handle_permission_request",
         )
+
+    async def _on_agent_output(self, agent_id: str, event: dict[str, Any]) -> None:
+        """Log agent stream events to provide visibility into agent thinking."""
+        event_type = event.get("type", "")
+
+        if event_type == "assistant":
+            # Extract text content from assistant messages
+            content_blocks = (event.get("message") or {}).get("content", [])
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    text = block["text"]
+                    # Truncate long text for readability
+                    if len(text) > 200:
+                        text = text[:200] + "..."
+                    logger.info(f"[{agent_id}] {text}")
+                elif block.get("type") == "tool_use":
+                    tool_name = block.get("name", "unknown")
+                    logger.info(f"[{agent_id}] calling tool: {tool_name}")
 
     async def _on_agent_exit(self, agent_id: str, exit_code: int) -> None:
         """Handle agent exit callback."""
