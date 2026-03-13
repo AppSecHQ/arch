@@ -906,26 +906,31 @@ class MCPServer:
         if self.on_close_project is None:
             return {"error": "close_project callback not configured"}
 
-        # Auto-update BRIEF.md current status with the close summary
-        await self._handle_update_brief(
-            section="current_status",
-            content=f"COMPLETE — {summary}"
-        )
-
         # Escalate to user for confirmation before shutting down
         answer = await self._escalate_and_wait(
             question=f"Archie wants to close the project:\n\n{summary}\n\nIs everything done?",
             options=["Yes, shut down", "No, keep working"],
         )
 
-        if answer and "no" in answer.lower() or "keep" in answer.lower():
-            # User wants to keep working — notify Archie
+        # Only "Yes, shut down" (or similar affirmative) proceeds with shutdown.
+        # ANY other response — including custom feedback — means keep working.
+        is_confirmed = answer and answer.lower().strip().startswith("yes")
+
+        if not is_confirmed:
+            # User wants to keep working — forward their full response to Archie
             self.state.add_message(
                 from_agent="system",
                 to_agent="archie",
-                content=f"User declined project close: \"{answer}\". Continue working."
+                content=f"User declined project close. User said: \"{answer}\". "
+                        "Take action on this feedback and continue working."
             )
             return {"ok": False, "reason": f"User declined: {answer}"}
+
+        # User confirmed — update BRIEF.md with final status
+        await self._handle_update_brief(
+            section="current_status",
+            content=f"COMPLETE — {summary}"
+        )
 
         # Notify Archie to review the brief
         self.state.add_message(

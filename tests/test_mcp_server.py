@@ -425,6 +425,25 @@ class TestArchieOnlyTools:
         callback.assert_not_called()
         assert result["ok"] is False
 
+    @pytest.mark.asyncio
+    async def test_close_project_custom_feedback_keeps_working(self, mcp_server):
+        """Custom feedback (not 'yes') keeps working and forwards to Archie."""
+        callback = AsyncMock(return_value=True)
+        mcp_server.on_close_project = callback
+        mcp_server._escalate_and_wait = AsyncMock(
+            return_value="The pricing boxes should be the same height. Fix this."
+        )
+
+        result = await mcp_server._handle_close_project(summary="All done")
+
+        callback.assert_not_called()
+        assert result["ok"] is False
+        # Verify the feedback was forwarded to Archie
+        messages = mcp_server.state.get_all_messages()
+        system_msgs = [m for m in messages if m["from"] == "system" and "pricing boxes" in m["content"]]
+        assert len(system_msgs) == 1
+        assert "Take action" in system_msgs[0]["content"]
+
 
 class TestUpdateBrief:
     """Tests for update_brief tool."""
