@@ -792,6 +792,21 @@ Each persona is a markdown file written in CLAUDE.md style for that role. The ha
 - Call `update_brief` (section: current_status) summarising what was done, what's in progress, and what's next
 - Call `close_project` to initiate graceful shutdown
 
+#### Mandatory Archie Rules (runtime-injected)
+
+The orchestrator appends mandatory rules to any custom Archie persona at runtime. These rules appear in Archie's CLAUDE.md under a `## ARCH System Rules (mandatory — do not override)` section and **cannot be removed or overridden** by custom persona files.
+
+The mandatory rules enforce:
+
+1. **Always call `close_project` before finishing** — Exiting without it triggers an escalation to the user asking whether to shut down or resume Archie.
+2. **Always call `get_project_context` on startup** — First action in every session.
+3. **Coordinator, not implementer** — Spawn agents for coding work.
+4. **Merge and tear down completed agents** — Review, merge, then clean up.
+5. **Update BRIEF.md after each merge** — Check off Done When items and update status.
+6. **Escalate when blocked** — Use `escalate_to_user` rather than stopping silently.
+
+These rules exist as a constant (`MANDATORY_ARCHIE_RULES`) in `orchestrator.py` and are appended after the user's custom persona content when writing Archie's CLAUDE.md.
+
 ---
 
 ## CLI Entrypoint (`arch.py`)

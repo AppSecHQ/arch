@@ -143,6 +143,36 @@ DEFAULT_ALLOWED_TOOLS_ARCHIE = [
 ]
 
 
+# Mandatory Archie rules — always appended to custom persona, cannot be overridden
+MANDATORY_ARCHIE_RULES = """
+---
+
+## ARCH System Rules (mandatory — do not override)
+
+These rules are enforced by the ARCH runtime regardless of custom persona instructions.
+
+1. **Always call `close_project` before finishing** — Never stop, go idle, or exit
+   without calling `close_project(summary: "...")`. This confirms with the user
+   before shutdown. Exiting without it is treated as an error.
+
+2. **Always call `get_project_context` on startup** — This is your first action
+   in every session. It gives you the BRIEF.md, active agents, and git status.
+
+3. **You are the coordinator, not the implementer** — Spawn agents to do
+   the actual coding. Do not write application code yourself.
+
+4. **Merge and tear down completed agents** — When an agent reports completion,
+   review it, merge the work, then tear down the agent.
+
+5. **Update BRIEF.md after each merge** — Check off Done When items with
+   `update_brief(section: "done_when", content: "matching text")` and update
+   current_status after significant progress.
+
+6. **Escalate when blocked** — If you cannot proceed, use `escalate_to_user`
+   rather than guessing or stopping silently.
+"""
+
+
 # ============================================================================
 # Configuration Dataclasses
 # ============================================================================
@@ -550,6 +580,9 @@ class Orchestrator:
             # Initialize worktree manager
             self.worktree_manager = WorktreeManager(self.repo_path)
 
+            # Ensure .worktrees/ and state/ are gitignored
+            self._ensure_gitignore()
+
             # Step 4: Permission gate
             logger.info("Step 4: Checking permission requirements...")
             if not await self._permission_gate():
@@ -731,6 +764,28 @@ class Orchestrator:
             logger.error("git status timed out")
             return False
 
+    def _ensure_gitignore(self) -> None:
+        """Ensure .worktrees/ and state/ are in .gitignore."""
+        gitignore_path = self.repo_path / ".gitignore"
+        required = [".worktrees/", "state/"]
+
+        existing = set()
+        if gitignore_path.exists():
+            existing = set(gitignore_path.read_text().splitlines())
+
+        missing = [entry for entry in required if entry not in existing]
+        if not missing:
+            return
+
+        with open(gitignore_path, "a") as f:
+            if existing and not gitignore_path.read_text().endswith("\n"):
+                f.write("\n")
+            f.write("# ARCH working directories\n")
+            for entry in missing:
+                f.write(f"{entry}\n")
+
+        logger.info(f"Added {', '.join(missing)} to .gitignore")
+
     async def _permission_gate(self) -> bool:
         """
         Check and confirm skip_permissions usage.
@@ -871,6 +926,9 @@ class Orchestrator:
         if existing_archie and existing_archie.get("context"):
             session_state = existing_archie["context"]
             logger.info("Injecting session state from previous Archie session")
+
+        # Append mandatory rules to persona (cannot be overridden by custom persona)
+        persona_content = persona_content.rstrip() + "\n" + MANDATORY_ARCHIE_RULES
 
         # Write CLAUDE.md with injected context
         self.worktree_manager.write_claude_md(
@@ -1423,9 +1481,44 @@ class Orchestrator:
 
         if exit_code is None or exit_code == 0:
             # Normal exit (--print mode completed prompt).
-            # Don't restart immediately. Let auto-resume handle future messages.
-            logger.info("Archie completed prompt and exited normally")
             self._crash_restart_count = 0  # Reset on successful completion
+
+            if self._project_complete:
+                logger.info("Archie exited after project completion")
+                return
+
+            # Archie exited without calling close_project — ask the user
+            logger.info("Archie exited without closing project — escalating to user")
+            if self.mcp_server:
+                try:
+                    answer = await self.mcp_server._escalate_and_wait(
+                        question=(
+                            "Archie finished and exited without closing the project. "
+                            "What would you like to do?"
+                        ),
+                        options=["Shut down", "Resume Archie"],
+                    )
+                    if answer and "resume" in answer.lower():
+                        logger.info("User requested Archie resume")
+                        session_id = self._archie_session.session_id if self._archie_session else None
+                        config = self._build_archie_config()
+                        prompt = answer if answer.lower() != "resume archie" else "User asked you to continue. Check project status and proceed."
+                        self._archie_session = await self.session_manager.spawn(
+                            config, prompt,
+                            resume_session_id=session_id,
+                        )
+                        if self._archie_session:
+                            self._archie_exit_handled = False
+                            logger.info("Archie resumed by user request")
+                        return
+                    else:
+                        # Shut down
+                        logger.info("User requested shutdown")
+                        self._shutdown_requested = True
+                        return
+                except Exception as e:
+                    logger.warning(f"Failed to escalate Archie exit: {e}")
+
             return
 
         # Non-zero exit code: this is a crash. Attempt restart.

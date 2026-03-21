@@ -226,6 +226,28 @@ body {
   font-size: 13px;
 }
 .help-btn:hover { border-color: var(--accent); color: var(--accent); }
+.shortcuts {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.shortcut-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: "SF Mono", monospace;
+  transition: all 0.15s;
+}
+.shortcut-btn:hover { border-color: var(--accent); color: var(--accent); }
+.shortcut-btn .shortcut-label {
+  font-family: -apple-system, sans-serif;
+  margin-left: 4px;
+  font-size: 11px;
+}
 
 /* Main Layout */
 .main {
@@ -611,7 +633,12 @@ body {
   <div class="header-right">
     <span id="runtime">00:00:00</span>
     <span><span class="connection-dot disconnected" id="conn-dot"></span> <span id="conn-text">Connecting</span></span>
-    <button class="help-btn" onclick="showModal(\'help\')">?</button>
+    <div class="shortcuts">
+      <button class="shortcut-btn" onclick="toggleCosts()">c<span class="shortcut-label">costs</span></button>
+      <button class="shortcut-btn" onclick="showModal(\'messages\')">m<span class="shortcut-label">messages</span></button>
+      <button class="shortcut-btn" onclick="showModal(\'events\')">e<span class="shortcut-label">events</span></button>
+      <button class="shortcut-btn" onclick="showModal(\'help\')">?<span class="shortcut-label">help</span></button>
+    </div>
   </div>
 </div>
 
@@ -684,6 +711,26 @@ let connected = false;
 let autoScroll = true;
 let seenMessageIds = new Set();
 
+// Notification sound — triple ascending chime (C5 → E5 → G5)
+function playNotificationSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [523, 659, 784].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      const t = ctx.currentTime + i * 0.1;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.12, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+      osc.start(t);
+      osc.stop(t + 0.12);
+    });
+  } catch (e) { /* Audio not available */ }
+}
+
 // SSE Connection
 let evtSource = null;
 
@@ -719,6 +766,7 @@ function connectSSE() {
     const decision = JSON.parse(e.data);
     currentDecision = decision;
     renderEscalation();
+    playNotificationSound();
   });
 
   evtSource.addEventListener("escalation_cleared", (e) => {
