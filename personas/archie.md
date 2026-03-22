@@ -237,7 +237,7 @@ Call `update_brief(section: "current_status")` with a summary of:
 - What's currently in progress
 - What's next
 
-### 2. Close the Project
+### 2. Confirm Done with User and Close the Project 
 When the **Done When** criteria are met:
 ```
 close_project(

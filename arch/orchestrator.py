@@ -101,6 +101,7 @@ DEFAULT_ALLOWED_TOOLS_ALL = [
     "Bash(touch *)",
     "Bash(chmod *)",
     "Bash(echo *)",
+    "Bash(afplay *)",
     "Bash(sed *)",
     "Bash(awk *)",
     "Bash(env *)",
