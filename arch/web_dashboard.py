@@ -369,17 +369,47 @@ body {
   padding: 8px 16px;
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   font-size: 13px;
 }
 .cost-agent { color: var(--text); }
 .cost-value { color: var(--text-dim); font-family: "SF Mono", monospace; }
+.cost-tokens { color: var(--text-dim); font-family: "SF Mono", monospace; font-size: 12px; }
+.cost-detail {
+  text-align: right;
+}
+.cost-detail-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
 .cost-total {
   padding: 10px 16px;
   border-top: 1px solid var(--panel-border);
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   font-weight: 600;
   font-size: 14px;
+}
+.cost-view-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 4px 16px 8px;
+}
+.cost-view-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+.cost-view-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
 }
 .budget-bar-container {
   margin: 12px 16px;
@@ -485,6 +515,19 @@ body {
   font-weight: 500;
 }
 .escalation-send:hover { background: #5aadff; }
+
+/* Escalation history in activity log */
+.escalation-history {
+  border-left: 2px solid var(--orange);
+  padding-left: 8px;
+}
+.escalation-q {
+  color: var(--orange) !important;
+}
+.eq-label {
+  font-weight: 600;
+  color: var(--text-dim);
+}
 
 /* Message input (when no escalation) */
 .message-bar {
@@ -659,6 +702,11 @@ body {
   <!-- Costs Panel (hidden by default) -->
   <div class="panel" id="costs-panel" style="display:none">
     <div class="panel-header">Costs</div>
+    <div class="cost-view-toggle">
+      <button class="cost-view-btn active" id="cost-view-cost" onclick="setCostView(\'cost\')">$</button>
+      <button class="cost-view-btn" id="cost-view-tokens" onclick="setCostView(\'tokens\')">Tokens</button>
+      <button class="cost-view-btn" id="cost-view-both" onclick="setCostView(\'both\')">Both</button>
+    </div>
     <div class="panel-body" id="costs-list"></div>
   </div>
 </div>
@@ -764,6 +812,8 @@ function connectSSE() {
 
   evtSource.addEventListener("escalation", (e) => {
     const decision = JSON.parse(e.data);
+    // Don't re-render if it's the same decision (would wipe user's typing)
+    if (currentDecision && currentDecision.id === decision.id) return;
     currentDecision = decision;
     renderEscalation();
     playNotificationSound();
@@ -868,24 +918,82 @@ function addActivityEntry(msg) {
   }
 }
 
+function addEscalationHistoryEntry(question, answer) {
+  const log = document.getElementById("activity-log");
+  const div = document.createElement("div");
+  div.className = "activity-entry escalation-history";
+
+  const now = new Date();
+  const hhmm = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+
+  // Truncate long questions for the log
+  const shortQ = question.length > 120 ? question.substring(0, 120) + "…" : question;
+
+  div.innerHTML = `<span class="activity-time">${hhmm}</span><span class="activity-sender escalation-q">escalation</span><span class="activity-content"><span class="eq-label">Q:</span> ${escapeHtml(shortQ)}<br><span class="eq-label">A:</span> ${escapeHtml(answer)}</span>`;
+  log.appendChild(div);
+
+  if (autoScroll) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+let costViewMode = "cost"; // "cost", "tokens", "both"
+
+function formatTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
+
+function setCostView(mode) {
+  costViewMode = mode;
+  document.querySelectorAll(".cost-view-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById("cost-view-" + mode).classList.add("active");
+  renderCosts();
+}
+
+function costValueHtml(usage) {
+  const cost = usage.cost_usd || 0;
+  const inTok = usage.input_tokens || 0;
+  const outTok = usage.output_tokens || 0;
+  const totalTok = inTok + outTok;
+
+  if (costViewMode === "cost") {
+    return `<span class="cost-value">$${cost.toFixed(4)}</span>`;
+  }
+  if (costViewMode === "tokens") {
+    return `<div class="cost-detail"><span class="cost-tokens">${formatTokens(totalTok)}</span><div class="cost-detail-sub">${formatTokens(inTok)} in · ${formatTokens(outTok)} out</div></div>`;
+  }
+  // both
+  return `<div class="cost-detail"><span class="cost-value">$${cost.toFixed(4)}</span><div class="cost-detail-sub">${formatTokens(totalTok)} tokens</div></div>`;
+}
+
 function renderCosts() {
   const list = document.getElementById("costs-list");
   list.innerHTML = "";
-  let total = 0;
+  let totalCost = 0;
+  let totalTokens = 0;
 
   const entries = Object.entries(state.costs);
   for (const [agentId, usage] of entries) {
-    const cost = usage.cost_usd || 0;
-    total += cost;
+    totalCost += usage.cost_usd || 0;
+    totalTokens += (usage.input_tokens || 0) + (usage.output_tokens || 0);
     const div = document.createElement("div");
     div.className = "cost-item";
-    div.innerHTML = `<span class="cost-agent">${escapeHtml(agentId)}</span><span class="cost-value">$${cost.toFixed(4)}</span>`;
+    div.innerHTML = `<span class="cost-agent">${escapeHtml(agentId)}</span>${costValueHtml(usage)}`;
     list.appendChild(div);
   }
 
   const totalDiv = document.createElement("div");
   totalDiv.className = "cost-total";
-  totalDiv.innerHTML = `<span>Total</span><span>$${total.toFixed(4)}</span>`;
+  const totalUsage = { cost_usd: totalCost, input_tokens: totalTokens, output_tokens: 0 };
+  if (costViewMode === "cost") {
+    totalDiv.innerHTML = `<span>Total</span><span>$${totalCost.toFixed(4)}</span>`;
+  } else if (costViewMode === "tokens") {
+    totalDiv.innerHTML = `<span>Total</span><span class="cost-tokens">${formatTokens(totalTokens)}</span>`;
+  } else {
+    totalDiv.innerHTML = `<span>Total</span><div class="cost-detail"><span>$${totalCost.toFixed(4)}</span><div class="cost-detail-sub">${formatTokens(totalTokens)} tokens</div></div>`;
+  }
   list.appendChild(totalDiv);
 }
 
@@ -928,6 +1036,7 @@ function renderEscalation() {
 async function sendEscalationAnswer(answer) {
   if (!currentDecision) return;
   const decisionId = currentDecision.id;
+  const question = currentDecision.question;
   try {
     const resp = await fetch(`/api/escalation/${decisionId}`, {
       method: "POST",
@@ -935,6 +1044,8 @@ async function sendEscalationAnswer(answer) {
       body: JSON.stringify({ answer })
     });
     if (resp.ok) {
+      // Log the Q&A to activity history
+      addEscalationHistoryEntry(question, answer);
       currentDecision = null;
       renderEscalation();
       showToast("Answer sent", "success");
@@ -963,6 +1074,13 @@ async function sendMessage() {
       body: JSON.stringify({ content: val })
     });
     if (resp.ok) {
+      // Show sent message in activity log immediately
+      addActivityEntry({
+        from: "you",
+        content: val,
+        timestamp: new Date().toISOString(),
+        id: "user-" + Date.now()
+      });
       input.value = "";
       showToast("Message sent", "success");
     }
