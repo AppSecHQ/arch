@@ -204,4 +204,4 @@ echo "Press Enter to launch..."
 read
 
 source "$ARCH_DIR/.venv/bin/activate"
-python "$ARCH_DIR/arch.py" up
+python "$ARCH_DIR/arch.py" up --clean
