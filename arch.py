@@ -3,8 +3,8 @@
 ARCH CLI - Agent Runtime & Coordination Harness
 
 Usage:
-  archie up [--config arch.yaml] [--keep-worktrees]
-        Start ARCH and launch Archie
+  archie up [--config arch.yaml] [--keep-worktrees] [--clean]
+        Start ARCH and launch Archie (--clean wipes state for fresh session)
 
   archie down
         Gracefully shut down all agents and clean up
@@ -133,6 +133,20 @@ async def cmd_up(args: argparse.Namespace) -> int:
     with open(config_path) as f:
         raw_config = yaml.safe_load(f)
     mcp_port = raw_config.get("settings", {}).get("mcp_port", 3999)
+
+    # Clear state directory if --clean flag
+    if args.clean and state_dir.exists():
+        import shutil
+        # Preserve events.jsonl as historical record
+        events_backup = None
+        events_path = state_dir / "events.jsonl"
+        if events_path.exists():
+            events_backup = events_path.read_text()
+        shutil.rmtree(state_dir)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        if events_backup:
+            events_path.write_text(events_backup)
+        print("State directory cleared (--clean)")
 
     print_banner()
     print(f"Starting ARCH with config: {config_path}")
@@ -617,6 +631,11 @@ Examples:
         "--keep-worktrees",
         action="store_true",
         help="Don't remove worktrees on shutdown"
+    )
+    up_parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clear state directory before starting (fresh session)"
     )
 
     # archie down
