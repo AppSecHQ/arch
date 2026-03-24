@@ -485,7 +485,7 @@ class TestUATSingleAgent:
             "agent_pool": [
                 {"id": "frontend", "persona": "personas/frontend.md", "model": "claude-sonnet-4-5", "max_instances": 1},
             ],
-            "settings": {"max_concurrent_agents": 3, "state_dir": str(project_dir / "state"), "mcp_port": 0, "token_budget_usd": 5.0},
+            "settings": {"max_concurrent_agents": 3, "state_dir": str(project_dir / "state"), "mcp_port": 0, "token_budget_usd": 5.0, "auto_resume_archie": False},
         }
         (project_dir / "arch.yaml").write_text(yaml.dump(config))
         (project_dir / ".gitignore").write_text("state/\n.worktrees/\n")
